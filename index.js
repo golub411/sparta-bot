@@ -4,6 +4,7 @@ const { YooCheckout } = require('@a2seven/yoo-checkout');
 const { MongoClient } = require('mongodb');
 const express = require('express');
 const crypto = require('crypto');
+const cron = require('node-cron');
 
 // Загружаем администраторов из .env
 const ADMINS = process.env.ADMINS ? process.env.ADMINS.split(',').map(id => id.trim()) : [];
@@ -221,7 +222,7 @@ bot.command('start', async (ctx) => {
                     inline_keyboard: [
                         [{ 
                             text: '💬 Техподдержка', 
-                            url: 'https://t.me/your_support' 
+                            url: 'https://t.me/golube123' 
                         }]
                     ]
                 }
@@ -260,7 +261,7 @@ bot.command('start', async (ctx) => {
                     }],
                     [{ 
                         text: '❓ Помощь', 
-                        url: 'https://t.me/your_support' 
+                        url: 'https://t.me/golube123' 
                     }]
                 ]
             }
@@ -307,6 +308,38 @@ bot.action('admin_users', async (ctx) => {
         }
     });
 });
+
+bot.command('mysub', async (ctx) => {
+    const sub = await subscriptionsCollection.findOne({ userId: ctx.from.id });
+    if (!sub) return ctx.reply("❌ У вас нет активной подписки");
+
+    ctx.replyWithMarkdown(`
+📌 *Информация о подписке*
+Статус: ${sub.status}
+Автопродление: ${sub.autoRenew ? "✅ Включено" : "❌ Отключено"}
+Действует до: ${sub.currentPeriodEnd.toLocaleDateString()}
+    `, {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: sub.autoRenew ? "❌ Отключить автопродление" : "🔄 Включить автопродление", callback_data: "toggle_autorenew" }]
+            ]
+        }
+    });
+});
+
+bot.action("toggle_autorenew", async (ctx) => {
+    const sub = await subscriptionsCollection.findOne({ userId: ctx.from.id });
+    if (!sub) return ctx.answerCbQuery("❌ Подписка не найдена");
+
+    const newStatus = !sub.autoRenew;
+    await subscriptionsCollection.updateOne(
+        { userId: ctx.from.id },
+        { $set: { autoRenew: newStatus } }
+    );
+
+    ctx.editMessageText(`🔄 Автопродление ${newStatus ? "включено ✅" : "отключено ❌"}`);
+});
+
 
 // Проверить пользователя
 bot.action('admin_check', async (ctx) => {
@@ -572,7 +605,7 @@ bot.action(/check_payment:(.+)/, async (ctx) => {
                     reply_markup: result.link ? {
                         inline_keyboard: [
                             [{ text: '🚀 Перейти в сообщество', url: result.link }],
-                            [{ text: '💬 Техподдержка', url: 'https://t.me/your_support' }]
+                            [{ text: '💬 Техподдержка', url: 'https://t.me/golube123' }]
                         ]
                     } : null
                 });
@@ -757,3 +790,37 @@ startApp();
 // Graceful shutdown
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+cron.schedule('0 3 * * *', async () => {
+    const now = new Date();
+    const expiringSubs = await subscriptionsCollection.find({
+        status: 'active',
+        autoRenew: true,
+        currentPeriodEnd: { $lte: now }
+    }).toArray();
+
+    for (const sub of expiringSubs) {
+        try {
+            const newPayment = await checkout.createPayment({
+                amount: { value: '1000.00', currency: 'RUB' },
+                capture: true,
+                payment_method_id: sub.paymentMethodId,
+                description: `Продление подписки для пользователя ${sub.userId}`,
+                metadata: { userId: sub.userId }
+            });
+
+            if (newPayment.status === 'succeeded') {
+                await activateSubscription(sub.userId, newPayment);
+                await bot.telegram.sendMessage(sub.userId, "✅ Ваша подписка продлена на месяц!");
+            } else {
+                await subscriptionsCollection.updateOne(
+                    { userId: sub.userId },
+                    { $set: { status: 'past_due' } }
+                );
+                await bot.telegram.sendMessage(sub.userId, "⚠️ Автосписание не удалось. Попробуйте оплатить вручную через /start");
+            }
+        } catch (err) {
+            console.error('Ошибка автопродления:', err);
+        }
+    }
+});
