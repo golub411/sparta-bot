@@ -27,6 +27,7 @@ const checkout = new YooCheckout({
 // Подключение к MongoDB
 let db;
 let paymentsCollection;
+let subscriptionsCollection;
 
 async function connectToDatabase() {
     try {
@@ -36,6 +37,13 @@ async function connectToDatabase() {
         
         db = client.db();
         paymentsCollection = db.collection('payments');
+
+        subscriptionsCollection = db.collection('subscriptions');
+
+        // индексы
+        await subscriptionsCollection.createIndex({ userId: 1 }, { unique: true });
+        await subscriptionsCollection.createIndex({ status: 1 });
+        await subscriptionsCollection.createIndex({ currentPeriodEnd: 1 });
         
         // Создаем индексы для оптимизации
         await paymentsCollection.createIndex({ userId: 1 });
