@@ -29,6 +29,27 @@ let db;
 let paymentsCollection;
 let subscriptionsCollection;
 
+async function activateSubscription(userId, paymentInfo) {
+    const expiresAt = new Date();
+    expiresAt.setMonth(expiresAt.getMonth() + 1); // подписка на 1 месяц
+
+    await subscriptionsCollection.updateOne(
+        { userId },
+        {
+            $set: {
+                userId,
+                status: 'active',
+                currentPeriodEnd: expiresAt,
+                autoRenew: true,
+                lastPaymentId: paymentInfo.id,
+                amount: paymentInfo.amount.value,
+                updatedAt: new Date()
+            }
+        },
+        { upsert: true }
+    );
+}
+
 async function connectToDatabase() {
     try {
         const client = new MongoClient(process.env.MONGODB_URI);
@@ -616,6 +637,8 @@ bot.action(/check_payment:(.+)/, async (ctx) => {
                     amount: paymentInfo.amount.value
                 }
             );
+            
+            await activateSubscription(userId, paymentInfo);
 
             let message = `🎉 *Оплата успешно завершена!*\n\n`;
             
@@ -751,6 +774,8 @@ app.post('/yookassa-webhook', async (req, res) => {
                     updatedAt: new Date()
                 }
             );
+
+            await activateSubscription(userId, payment);
 
             let message = `🎉 *Оплата успешно завершена!*\n\n`;
             
