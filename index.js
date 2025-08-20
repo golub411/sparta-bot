@@ -63,10 +63,54 @@ async function updatePayment(query, updateData) {
 // Middleware для обработки JSON
 app.use(express.json());
 
+// Функция для проверки, является ли пользователь участником чата
+async function isUserInChat(userId) {
+    try {
+        const chatId = process.env.CHANNEL_ID;
+        const member = await bot.telegram.getChatMember(chatId, userId);
+        
+        // Если пользователь является владельцем, администратором или участником
+        return ['creator', 'administrator', 'member', 'restricted'].includes(member.status);
+    } catch (error) {
+        // Если пользователь не найден в чате или нет доступа
+        if (error.response && error.response.description.includes('user not found')) {
+            return false;
+        }
+        console.error('Ошибка при проверке участника чата:', error);
+        return false;
+    }
+}
+
+// Функция для проверки, является ли пользователь владельцем чата
+async function isChatOwner(userId) {
+    try {
+        const chatId = process.env.CHANNEL_ID;
+        const member = await bot.telegram.getChatMember(chatId, userId);
+        return member.status === 'creator';
+    } catch (error) {
+        console.error('Ошибка при проверке владельца чата:', error);
+        return false;
+    }
+}
+
 // Функция для добавления пользователя в чат/канал
 async function addUserToChat(userId) {
     try {
         const chatId = process.env.CHANNEL_ID;
+        
+        // Проверяем, не является ли пользователь уже участником
+        const isAlreadyMember = await isUserInChat(userId);
+        if (isAlreadyMember) {
+            console.log(`✅ Пользователь ${userId} уже в чате`);
+            return { success: true, alreadyMember: true, link: null };
+        }
+        
+        // Проверяем, не является ли пользователь владельцем
+        const isOwner = await isChatOwner(userId);
+        if (isOwner) {
+            console.log(`✅ Пользователь ${userId} - владелец чата`);
+            return { success: true, isOwner: true, link: null };
+        }
         
         // Пробуем получить информацию о чате
         const chat = await bot.telegram.getChat(chatId);
@@ -75,34 +119,59 @@ async function addUserToChat(userId) {
             // Для каналов - получаем инвайт-ссылку
             try {
                 const inviteLink = await bot.telegram.exportChatInviteLink(chatId);
-                await bot.telegram.unbanChatMember(chatId, userId);
+                // Для каналов не нужно разбанивать, достаточно дать ссылку
                 return { success: true, link: inviteLink, type: 'channel' };
             } catch (error) {
                 console.error('Ошибка с каналом:', error);
                 throw error;
             }
         } else {
-            // Для чатов/групп - добавляем пользователя напрямую
+            // Для чатов/групп - добавляем пользователя
             try {
-                await bot.telegram.unbanChatMember(chatId, userId);
-                
-                // Пробуем создать инвайт-ссылку для чата
+                // Сначала пробуем создать инвайт-ссылку
+                let inviteLink = null;
                 try {
-                    const inviteLink = await bot.telegram.exportChatInviteLink(chatId);
-                    return { success: true, link: inviteLink, type: 'chat' };
+                    inviteLink = await bot.telegram.exportChatInviteLink(chatId);
                 } catch (linkError) {
-                    // Если не можем создать ссылку, просто добавляем пользователя
-                    return { success: true, link: null, type: 'chat' };
+                    console.log('Не удалось создать инвайт-ссылку:', linkError.message);
                 }
+                
+                // Пробуем добавить пользователя (разбанить если нужно)
+                try {
+                    await bot.telegram.unbanChatMember(chatId, userId);
+                } catch (unbanError) {
+                    // Игнорируем ошибку "user not banned"
+                    if (!unbanError.response.description.includes('not banned')) {
+                        throw unbanError;
+                    }
+                }
+                
+                // Пробуем добавить пользователя напрямую
+                try {
+                    await bot.telegram.addChatMember(chatId, userId);
+                } catch (addError) {
+                    // Игнорируем ошибку "user already participant"
+                    if (!addError.response.description.includes('already participant')) {
+                        throw addError;
+                    }
+                }
+                
+                return { success: true, link: inviteLink, type: 'chat' };
+                
             } catch (error) {
                 console.error('Ошибка при добавлении в чат:', error);
+                
+                // Если не удалось добавить, но есть ссылка - возвращаем ссылку
+                if (inviteLink) {
+                    return { success: true, link: inviteLink, type: 'chat', warning: 'Не удалось добавить автоматически' };
+                }
                 throw error;
             }
         }
         
     } catch (error) {
         console.error('Ошибка при добавлении пользователя:', error);
-        throw error;
+        return { success: false, error: error.message };
     }
 }
 
@@ -136,10 +205,30 @@ function verifyNotificationSignature(body, signature, secret) {
     return signature === hmac.digest('hex');
 }
 
-// Команда /start
+// Команда /start с проверкой наличия доступа
 bot.command('start', async (ctx) => {
     try {
         const userId = ctx.from.id;
+        
+        // Проверяем, есть ли уже пользователь в чате
+        const isMember = await isUserInChat(userId);
+        if (isMember) {
+            return ctx.replyWithMarkdown(`
+✅ *Вы уже имеете доступ к нашему сообществу!*
+
+Если у вас возникли проблемы с доступом, обратитесь в техподдержку.
+            `, {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ 
+                            text: '💬 Техподдержка', 
+                            url: 'https://t.me/your_support' 
+                        }]
+                    ]
+                }
+            });
+        }
+        
         const paymentId = `yk_${Date.now()}_${userId}`;
 
         await createPayment({
@@ -190,6 +279,17 @@ bot.action(/init_pay:(.+)/, async (ctx) => {
     const userId = ctx.from.id;
 
     try {
+        // Проверяем, есть ли уже доступ
+        const isMember = await isUserInChat(userId);
+        if (isMember) {
+            await ctx.editMessageText(`
+✅ *У вас уже есть доступ к сообществу!*
+
+Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
+            `, { parse_mode: 'Markdown' });
+            return ctx.answerCbQuery();
+        }
+
         const paymentData = await getPayment({ _id: paymentId, userId: userId });
         if (!paymentData) {
             return ctx.answerCbQuery('⚠️ Платеж не найден');
@@ -233,6 +333,17 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
     const userId = ctx.from.id;
 
     try {
+        // Проверяем, есть ли уже доступ
+        const isMember = await isUserInChat(userId);
+        if (isMember) {
+            await ctx.editMessageText(`
+✅ *У вас уже есть доступ к сообществу!*
+
+Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
+            `, { parse_mode: 'Markdown' });
+            return ctx.answerCbQuery();
+        }
+
         const paymentData = await getPayment({ _id: paymentId, userId: userId });
         if (!paymentData) {
             return ctx.answerCbQuery('⚠️ Платеж не найден');
@@ -304,6 +415,17 @@ bot.action(/check_payment:(.+)/, async (ctx) => {
     try {
         ctx.answerCbQuery('🔍 Проверяем платеж...');
         
+        // Проверяем, есть ли уже доступ
+        const isMember = await isUserInChat(userId);
+        if (isMember) {
+            await ctx.editMessageText(`
+✅ *У вас уже есть доступ к сообществу!*
+
+Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
+            `, { parse_mode: 'Markdown' });
+            return;
+        }
+
         const paymentData = await getPayment({ _id: paymentId, userId: userId });
         if (!paymentData || !paymentData.yooId) {
             throw new Error('Платеж не найден');
@@ -326,10 +448,14 @@ bot.action(/check_payment:(.+)/, async (ctx) => {
             let message = `🎉 *Оплата успешно завершена!*\n\n`;
             
             if (result.success) {
-                if (result.link) {
+                if (result.alreadyMember) {
+                    message += `✅ Вы уже имеете доступ к сообществу!\n\n`;
+                } else if (result.isOwner) {
+                    message += `👑 Вы являетесь владельцем сообщества!\n\n`;
+                } else if (result.link) {
                     message += `Вот ваша персональная ссылка для доступа:\n${result.link}\n\n`;
                 } else {
-                    message += `Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
+                    message += `✅ Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
                 }
                 
                 message += `📌 *Важно:* Не передавайте доступ другим пользователям!`;
@@ -419,6 +545,28 @@ app.post('/yookassa-webhook', async (req, res) => {
                 return res.status(404).send('Payment not found');
             }
 
+            // Проверяем, есть ли уже доступ
+            const isMember = await isUserInChat(userId);
+            if (isMember) {
+                await updatePayment(
+                    { _id: paymentId },
+                    {
+                        status: 'already_member',
+                        paidAt: new Date(),
+                        amount: payment.amount.value,
+                        updatedAt: new Date()
+                    }
+                );
+                
+                await bot.telegram.sendMessage(userId, `
+✅ *Оплата успешно завершена!*
+
+У вас уже есть доступ к сообществу. Если возникли проблемы, обратитесь в техподдержку.
+                `, { parse_mode: 'Markdown' });
+                
+                return res.status(200).send();
+            }
+
             const result = await addUserToChat(userId);
 
             await updatePayment(
@@ -434,10 +582,14 @@ app.post('/yookassa-webhook', async (req, res) => {
             let message = `🎉 *Оплата успешно завершена!*\n\n`;
             
             if (result.success) {
-                if (result.link) {
+                if (result.alreadyMember) {
+                    message += `✅ Вы уже имеете доступ к сообществу!\n\n`;
+                } else if (result.isOwner) {
+                    message += `👑 Вы являетесь владельцем сообщества!\n\n`;
+                } else if (result.link) {
                     message += `Вот ваша персональная ссылка для доступа:\n${result.link}\n\n`;
                 } else {
-                    message += `Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
+                    message += `✅ Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
                 }
                 
                 message += `📌 *Важно:* Не передавайте доступ другим пользователям!`;
