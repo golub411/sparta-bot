@@ -5,6 +5,14 @@ const { MongoClient } = require('mongodb');
 const express = require('express');
 const crypto = require('crypto');
 
+// Загружаем администраторов из .env
+const ADMINS = process.env.ADMINS ? process.env.ADMINS.split(',').map(id => id.trim()) : [];
+
+// Проверка администратора
+function isAdmin(userId) {
+    return ADMINS.includes(userId.toString());
+}
+
 // Инициализация приложения
 const app = express();
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
@@ -189,6 +197,18 @@ bot.command('start', async (ctx) => {
     try {
         const userId = ctx.from.id;
         
+        // Если админ → показываем кнопку для входа в админку
+        if (isAdmin(userId)) {
+            return ctx.reply('⚙️ Добро пожаловать в панель администратора!', {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: '🚀 Войти в админку', callback_data: 'admin_panel' }]
+                    ]
+                }
+            });
+        }
+
+
         // Проверяем, есть ли уже пользователь в чате
         const isMember = await isUserInChat(userId);
         if (isMember) {
@@ -250,6 +270,86 @@ bot.command('start', async (ctx) => {
         console.error('Ошибка в команде /start:', error);
         ctx.reply('⚠️ Произошла ошибка. Попробуйте позже.');
     }
+});
+
+bot.action('admin_panel', async (ctx) => {
+    const userId = ctx.from.id;
+    if (!isAdmin(userId)) return ctx.answerCbQuery('⛔ Нет доступа');
+
+    await ctx.editMessageText('⚙️ Панель администратора', {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '👥 Список пользователей', callback_data: 'admin_users' }],
+                [{ text: '🔍 Проверить пользователя', callback_data: 'admin_check' }],
+                [{ text: '📊 Статистика', callback_data: 'admin_stats' }],
+                [{ text: '⬅️ Назад', callback_data: 'admin_back' }]
+            ]
+        }
+    });
+});
+
+bot.action('admin_users', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Нет доступа');
+
+    const users = await paymentsCollection.find().limit(10).toArray();
+    let text = '👥 *Список пользователей (первые 10):*\n\n';
+    users.forEach(u => {
+        text += `ID: ${u.userId}, Username: @${u.username || '-'}, Статус: ${u.status}\n`;
+    });
+
+    await ctx.editMessageText(text, { parse_mode: 'Markdown',
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '⬅️ Назад', callback_data: 'admin_panel' }]
+            ]
+        }
+    });
+});
+
+bot.action('admin_check', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Нет доступа');
+
+    await ctx.editMessageText('Введите ID пользователя для проверки:');
+
+    // Ждём следующего сообщения от админа
+    bot.on('text', async (msgCtx) => {
+        if (!isAdmin(msgCtx.from.id)) return;
+
+        const queryId = parseInt(msgCtx.message.text.trim());
+        const user = await paymentsCollection.findOne({ userId: queryId });
+
+        if (user) {
+            await msgCtx.replyWithMarkdown(`
+👤 *Информация о пользователе*  
+ID: \`${user.userId}\`  
+Username: @${user.username || '-'}  
+Имя: ${user.firstName || ''} ${user.lastName || ''}  
+Статус: ${user.status}  
+Дата создания: ${user.createdAt}
+            `);
+        } else {
+            await msgCtx.reply('❌ Пользователь не найден');
+        }
+    });
+});
+
+bot.action('admin_stats', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Нет доступа');
+
+    const totalUsers = await paymentsCollection.distinct('userId');
+    const totalPayments = await paymentsCollection.countDocuments();
+
+    await ctx.editMessageText(`
+📊 *Статистика*  
+👥 Пользователей: ${totalUsers.length}  
+💳 Платежей: ${totalPayments}
+    `, { parse_mode: 'Markdown',
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '⬅️ Назад', callback_data: 'admin_panel' }]
+            ]
+        }
+    });
 });
 
 // Обработка кнопки "Оплатить"
