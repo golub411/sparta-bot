@@ -310,19 +310,26 @@ bot.action('admin_users', async (ctx) => {
     });
 });
 
-bot.command('mysub', async (ctx) => {
+bot.action("mysub", async (ctx) => {
     const sub = await subscriptionsCollection.findOne({ userId: ctx.from.id });
-    if (!sub) return ctx.reply("❌ У вас нет активной подписки");
+    if (!sub) {
+        return ctx.editMessageText("❌ У вас нет активной подписки");
+    }
 
-    ctx.replyWithMarkdown(`
+    await ctx.editMessageText(`
 📌 *Информация о подписке*
 Статус: ${sub.status}
 Автопродление: ${sub.autoRenew ? "✅ Включено" : "❌ Отключено"}
 Действует до: ${sub.currentPeriodEnd.toLocaleDateString()}
     `, {
+        parse_mode: "Markdown",
         reply_markup: {
             inline_keyboard: [
-                [{ text: sub.autoRenew ? "❌ Отключить автопродление" : "🔄 Включить автопродление", callback_data: "toggle_autorenew" }]
+                [{ 
+                    text: sub.autoRenew ? "❌ Отключить автопродление" : "🔄 Включить автопродление", 
+                    callback_data: "toggle_autorenew" 
+                }],
+                [{ text: "⬅️ Назад", callback_data: "back_to_start" }]
             ]
         }
     });
