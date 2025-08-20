@@ -220,6 +220,7 @@ bot.command('start', async (ctx) => {
             `, {
                 reply_markup: {
                     inline_keyboard: [
+                        [{ text: '📌 Моя подписка', callback_data: 'mysub' }],
                         [{ 
                             text: '💬 Техподдержка', 
                             url: 'https://t.me/golube123' 
@@ -437,20 +438,14 @@ bot.action(/init_pay:(.+)/, async (ctx) => {
     try {
         // Проверяем, есть ли уже доступ
         const isMember = await isUserInChat(userId);
-if (isMember) {
-    return ctx.replyWithMarkdown(`
-✅ *Вы уже имеете доступ к нашему сообществу!*
+        if (isMember) {
+            await ctx.editMessageText(`
+✅ *У вас уже есть доступ к сообществу!*
 
-Если у вас возникли проблемы с доступом, обратитесь в техподдержку.
-    `, {
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: '📌 Моя подписка', callback_data: 'mysub' }],
-                [{ text: '💬 Техподдержка', url: 'https://t.me/golube123' }]
-            ]
+Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
+            `, { parse_mode: 'Markdown' });
+            return ctx.answerCbQuery();
         }
-    });
-}
 
         const paymentData = await getPayment({ _id: paymentId, userId: userId });
         if (!paymentData) {
@@ -626,8 +621,8 @@ bot.action(/check_payment:(.+)/, async (ctx) => {
                     parse_mode: 'Markdown',
                     reply_markup: result.link ? {
                         inline_keyboard: [
-                            [{ text: '🚀 Перейти в сообщество', url: result.link }],
                             [{ text: '📌 Моя подписка', callback_data: 'mysub' }],
+                            [{ text: '🚀 Перейти в сообщество', url: result.link }],
                             [{ text: '💬 Техподдержка', url: 'https://t.me/golube123' }]
                         ]
                     } : null
