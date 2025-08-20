@@ -393,6 +393,21 @@ bot.action("toggle_autorenew", async (ctx) => {
     });
 });
 
+bot.action("back_to_start", async (ctx) => {
+    await ctx.editMessageText(`
+✅ *Вы уже имеете доступ к нашему сообществу!*
+
+Если у вас возникли проблемы с доступом, обратитесь в техподдержку.
+    `, {
+        parse_mode: "Markdown",
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: "📌 Моя подписка", callback_data: "mysub" }],
+                [{ text: "💬 Техподдержка", url: "https://t.me/golube123" }]
+            ]
+        }
+    });
+});
 
 // Проверить пользователя
 bot.action('admin_check', async (ctx) => {
