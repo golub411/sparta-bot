@@ -93,109 +93,88 @@ async function isChatOwner(userId) {
     }
 }
 
-// Функция для добавления пользователя в чат/канал
+// Функция для добавления пользователя в чат/канал через инвайт-ссылку
 async function addUserToChat(userId) {
     try {
         const chatId = process.env.CHANNEL_ID;
-        
+
         // Проверяем, не является ли пользователь уже участником
         const isAlreadyMember = await isUserInChat(userId);
         if (isAlreadyMember) {
             console.log(`✅ Пользователь ${userId} уже в чате`);
             return { success: true, alreadyMember: true, link: null };
         }
-        
+
         // Проверяем, не является ли пользователь владельцем
         const isOwner = await isChatOwner(userId);
         if (isOwner) {
             console.log(`✅ Пользователь ${userId} - владелец чата`);
             return { success: true, isOwner: true, link: null };
         }
-        
+
         // Пробуем получить информацию о чате
         const chat = await bot.telegram.getChat(chatId);
-        
-        if (chat.type === 'channel') {
-            // Для каналов - получаем инвайт-ссылку
-            try {
-                const inviteLink = await bot.telegram.exportChatInviteLink(chatId);
-                // Для каналов не нужно разбанивать, достаточно дать ссылку
-                return { success: true, link: inviteLink, type: 'channel' };
-            } catch (error) {
-                console.error('Ошибка с каналом:', error);
-                throw error;
-            }
-        } else {
-            // Для чатов/групп - добавляем пользователя
-            try {
-                // Сначала пробуем создать инвайт-ссылку
-                let inviteLink = null;
-                try {
-                    inviteLink = await bot.telegram.exportChatInviteLink(chatId);
-                } catch (linkError) {
-                    console.log('Не удалось создать инвайт-ссылку:', linkError.message);
-                }
-                
-                // Пробуем добавить пользователя (разбанить если нужно)
-                try {
-                    await bot.telegram.unbanChatMember(chatId, userId);
-                } catch (unbanError) {
-                    // Игнорируем ошибку "user not banned"
-                    if (!unbanError.response.description.includes('not banned')) {
-                        throw unbanError;
-                    }
-                }
-                
-                // Пробуем добавить пользователя напрямую
-                try {
-                    await bot.telegram.addChatMember(chatId, userId);
-                } catch (addError) {
-                    // Игнорируем ошибку "user already participant"
-                    if (!addError.response.description.includes('already participant')) {
-                        throw addError;
-                    }
-                }
-                
-                return { success: true, link: inviteLink, type: 'chat' };
-                
-            } catch (error) {
-                console.error('Ошибка при добавлении в чат:', error);
-                
-                // Если не удалось добавить, но есть ссылка - возвращаем ссылку
-                if (inviteLink) {
-                    return { success: true, link: inviteLink, type: 'chat', warning: 'Не удалось добавить автоматически' };
-                }
-                throw error;
-            }
+
+        // Для каналов и групп — генерируем инвайт-ссылку
+        let inviteLink = null;
+        try {
+            inviteLink = await bot.telegram.exportChatInviteLink(chatId);
+        } catch (linkError) {
+            console.error('Не удалось создать инвайт-ссылку:', linkError.message);
         }
-        
+
+        if (inviteLink) {
+            console.log(`🔗 Сгенерирована инвайт-ссылка для ${userId}: ${inviteLink}`);
+
+            // Пробуем разбанить пользователя (если он был кикнут)
+            try {
+                await bot.telegram.unbanChatMember(chatId, userId);
+            } catch (unbanError) {
+                if (!(unbanError.response && unbanError.response.description.includes('not banned'))) {
+                    console.error('Ошибка при разбане пользователя:', unbanError);
+                }
+            }
+
+            return { success: true, link: inviteLink, type: chat.type };
+        }
+
+        throw new Error('Не удалось получить инвайт-ссылку');
+
     } catch (error) {
         console.error('Ошибка при добавлении пользователя:', error);
         return { success: false, error: error.message };
     }
 }
 
+
 // Функция для проверки доступа к чату
 async function checkChatAccess() {
     try {
         const chatId = process.env.CHANNEL_ID;
+
+        // инициализируем информацию о боте, если еще нет
+        if (!bot.botInfo) {
+            bot.botInfo = await bot.telegram.getMe();
+        }
+
         const chat = await bot.telegram.getChat(chatId);
         console.log('📋 Информация о чате:', {
             id: chat.id,
             type: chat.type,
             title: chat.title
         });
-        
+
         // Проверяем права бота
         const member = await bot.telegram.getChatMember(chatId, bot.botInfo.id);
         console.log('👮 Права бота:', member.status);
-        
+
         return true;
     } catch (error) {
         console.error('❌ Чат недоступен:', error);
         return false;
     }
 }
+
 
 // Проверка подписи уведомлений от ЮКассы
 function verifyNotificationSignature(body, signature, secret) {
