@@ -1,0 +1,27 @@
+{
+  "name": "sparta-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/golub411/sparta-bot.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/golub411/sparta-bot/issues"
+  },
+  "homepage": "https://github.com/golub411/sparta-bot#readme",
+  "description": "",
+  "dependencies": {
+    "@a2seven/yoo-checkout": "^1.1.4",
+    "crypto": "^1.0.1",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "mongodb": "^6.18.0",
+    "telegraf": "^4.16.3"
+  }
+}
