@@ -334,10 +334,26 @@ bot.action("toggle_autorenew", async (ctx) => {
     const newStatus = !sub.autoRenew;
     await subscriptionsCollection.updateOne(
         { userId: ctx.from.id },
-        { $set: { autoRenew: newStatus } }
+        { $set: { autoRenew: newStatus, updatedAt: new Date() } }
     );
 
-    ctx.editMessageText(`🔄 Автопродление ${newStatus ? "включено ✅" : "отключено ❌"}`);
+    await ctx.editMessageText(`
+📌 *Информация о подписке*
+Статус: ${sub.status}
+Автопродление: ${newStatus ? "✅ Включено" : "❌ Отключено"}
+Действует до: ${sub.currentPeriodEnd.toLocaleDateString()}
+    `, {
+        parse_mode: "Markdown",
+        reply_markup: {
+            inline_keyboard: [
+                [{ 
+                    text: newStatus ? "❌ Отключить автопродление" : "🔄 Включить автопродление", 
+                    callback_data: "toggle_autorenew" 
+                }],
+                [{ text: "⬅️ Назад", callback_data: "back_to_start" }]
+            ]
+        }
+    });
 });
 
 
@@ -421,14 +437,20 @@ bot.action(/init_pay:(.+)/, async (ctx) => {
     try {
         // Проверяем, есть ли уже доступ
         const isMember = await isUserInChat(userId);
-        if (isMember) {
-            await ctx.editMessageText(`
-✅ *У вас уже есть доступ к сообществу!*
+if (isMember) {
+    return ctx.replyWithMarkdown(`
+✅ *Вы уже имеете доступ к нашему сообществу!*
 
-Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
-            `, { parse_mode: 'Markdown' });
-            return ctx.answerCbQuery();
+Если у вас возникли проблемы с доступом, обратитесь в техподдержку.
+    `, {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '📌 Моя подписка', callback_data: 'mysub' }],
+                [{ text: '💬 Техподдержка', url: 'https://t.me/golube123' }]
+            ]
         }
+    });
+}
 
         const paymentData = await getPayment({ _id: paymentId, userId: userId });
         if (!paymentData) {
@@ -605,6 +627,7 @@ bot.action(/check_payment:(.+)/, async (ctx) => {
                     reply_markup: result.link ? {
                         inline_keyboard: [
                             [{ text: '🚀 Перейти в сообщество', url: result.link }],
+                            [{ text: '📌 Моя подписка', callback_data: 'mysub' }],
                             [{ text: '💬 Техподдержка', url: 'https://t.me/golube123' }]
                         ]
                     } : null
