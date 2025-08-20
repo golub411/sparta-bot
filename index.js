@@ -272,9 +272,9 @@ bot.command('start', async (ctx) => {
     }
 });
 
+// Главная панель
 bot.action('admin_panel', async (ctx) => {
-    const userId = ctx.from.id;
-    if (!isAdmin(userId)) return ctx.answerCbQuery('⛔ Нет доступа');
+    if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Нет доступа');
 
     await ctx.editMessageText('⚙️ Панель администратора', {
         reply_markup: {
@@ -282,22 +282,24 @@ bot.action('admin_panel', async (ctx) => {
                 [{ text: '👥 Список пользователей', callback_data: 'admin_users' }],
                 [{ text: '🔍 Проверить пользователя', callback_data: 'admin_check' }],
                 [{ text: '📊 Статистика', callback_data: 'admin_stats' }],
-                [{ text: '⬅️ Назад', callback_data: 'admin_back' }]
+                [{ text: '⬅️ Выйти', callback_data: 'admin_exit' }]
             ]
         }
     });
 });
 
+// Список пользователей
 bot.action('admin_users', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Нет доступа');
 
     const users = await paymentsCollection.find().limit(10).toArray();
     let text = '👥 *Список пользователей (первые 10):*\n\n';
     users.forEach(u => {
-        text += `ID: ${u.userId}, Username: @${u.username || '-'}, Статус: ${u.status}\n`;
+        text += `• ID: ${u.userId}, Username: @${u.username || '-'}, Статус: ${u.status}\n`;
     });
 
-    await ctx.editMessageText(text, { parse_mode: 'Markdown',
+    await ctx.editMessageText(text || '❌ Пользователей нет', {
+        parse_mode: 'Markdown',
         reply_markup: {
             inline_keyboard: [
                 [{ text: '⬅️ Назад', callback_data: 'admin_panel' }]
@@ -306,13 +308,20 @@ bot.action('admin_users', async (ctx) => {
     });
 });
 
+// Проверить пользователя
 bot.action('admin_check', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Нет доступа');
 
-    await ctx.editMessageText('Введите ID пользователя для проверки:');
+    await ctx.editMessageText('Введите ID пользователя для проверки.\n\n⬅️ Нажмите «Назад» чтобы вернуться.', {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '⬅️ Назад', callback_data: 'admin_panel' }]
+            ]
+        }
+    });
 
-    // Ждём следующего сообщения от админа
-    bot.on('text', async (msgCtx) => {
+    // Ждём ввод ID
+    bot.once('text', async (msgCtx) => {
         if (!isAdmin(msgCtx.from.id)) return;
 
         const queryId = parseInt(msgCtx.message.text.trim());
@@ -326,13 +335,26 @@ Username: @${user.username || '-'}
 Имя: ${user.firstName || ''} ${user.lastName || ''}  
 Статус: ${user.status}  
 Дата создания: ${user.createdAt}
-            `);
+            `, {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: '⬅️ Назад в админку', callback_data: 'admin_panel' }]
+                    ]
+                }
+            });
         } else {
-            await msgCtx.reply('❌ Пользователь не найден');
+            await msgCtx.reply('❌ Пользователь не найден', {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: '⬅️ Назад в админку', callback_data: 'admin_panel' }]
+                    ]
+                }
+            });
         }
     });
 });
 
+// Статистика
 bot.action('admin_stats', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Нет доступа');
 
@@ -343,13 +365,19 @@ bot.action('admin_stats', async (ctx) => {
 📊 *Статистика*  
 👥 Пользователей: ${totalUsers.length}  
 💳 Платежей: ${totalPayments}
-    `, { parse_mode: 'Markdown',
+    `, {
+        parse_mode: 'Markdown',
         reply_markup: {
             inline_keyboard: [
                 [{ text: '⬅️ Назад', callback_data: 'admin_panel' }]
             ]
         }
     });
+});
+
+// Выход
+bot.action('admin_exit', async (ctx) => {
+    await ctx.editMessageText('✅ Вы вышли из админки');
 });
 
 // Обработка кнопки "Оплатить"
