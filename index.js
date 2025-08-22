@@ -29,6 +29,9 @@ let db;
 let paymentsCollection;
 let subscriptionsCollection;
 
+// Хранилище для временных данных
+const userSessions = new Map();
+
 async function activateSubscription(userId, paymentInfo) {
     const expiresAt = new Date();
     expiresAt.setMonth(expiresAt.getMonth() + 1); // подписка на 1 месяц
@@ -58,7 +61,6 @@ async function connectToDatabase() {
         
         db = client.db();
         paymentsCollection = db.collection('payments');
-
         subscriptionsCollection = db.collection('subscriptions');
 
         // индексы
@@ -184,7 +186,6 @@ async function addUserToChat(userId) {
     }
 }
 
-
 // Функция для проверки доступа к чату
 async function checkChatAccess() {
     try {
@@ -213,7 +214,6 @@ async function checkChatAccess() {
     }
 }
 
-
 // Проверка подписи уведомлений от ЮКассы
 function verifyNotificationSignature(body, signature, secret) {
     const message = `${body.event}.${body.object.id}`;
@@ -221,6 +221,147 @@ function verifyNotificationSignature(body, signature, secret) {
     hmac.update(message);
     return signature === hmac.digest('hex');
 }
+
+// Функция для запроса email у пользователя
+async function askForEmail(ctx, paymentId) {
+    await ctx.editMessageText(`
+📧 *Для оформления подписки нужен ваш email*
+
+Пожалуйста, введите ваш email для отправки чека.
+
+❗ Email должен быть действительным, так как на него будет отправлен чек об оплате.
+    `, { 
+        parse_mode: 'Markdown',
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: '❌ Отменить', callback_data: `cancel_pay:${paymentId}` }]
+            ]
+        }
+    });
+
+    // Сохраняем состояние пользователя
+    userSessions.set(ctx.from.id, {
+        waitingForEmail: true,
+        paymentId: paymentId,
+        messageId: ctx.update.callback_query.message.message_id
+    });
+}
+
+// Функция обработки платежа с email
+async function processPaymentWithEmail(ctx, paymentId, email) {
+    const userId = ctx.from.id;
+
+    try {
+        await ctx.editMessageText('🔄 *Создаем платеж...*', { parse_mode: 'Markdown' });
+
+        const createPayload = {
+            amount: { value: '1000.00', currency: 'RUB' },
+            payment_method_data: { type: 'bank_card' },
+            confirmation: {
+                type: 'redirect',
+                return_url: `https://t.me/${ctx.botInfo.username}`
+            },
+            description: `Подписка на сообщество для пользователя ${userId}`,
+            metadata: {
+                userId: userId,
+                paymentId: paymentId,
+                username: ctx.from.username || 'нет username',
+                email: email
+            },
+            capture: true,
+            receipt: {
+                customer: { 
+                    email: email
+                },
+                items: [
+                    {
+                        description: 'Подписка на эксклюзивное сообщество (1 месяц)',
+                        quantity: '1.00',
+                        amount: {
+                            value: '1000.00',
+                            currency: 'RUB'
+                        },
+                        vat_code: 1,
+                        payment_mode: 'full_payment',
+                        payment_subject: 'service'
+                    }
+                ]
+            }
+        };
+
+        const payment = await checkout.createPayment(createPayload);
+        
+        await updatePayment(
+            { _id: paymentId },
+            { 
+                yooId: payment.id,
+                status: 'waiting_for_capture',
+                paymentUrl: payment.confirmation.confirmation_url,
+                email: email
+            }
+        );
+
+        await ctx.editMessageText(`
+🔗 *Перейдите на страницу оплаты*
+
+Для завершения оплаты перейдите по ссылке ниже и следуйте инструкциям.
+
+После успешной оплаты вы автоматически получите доступ к сообществу.
+
+📧 Чек будет отправлен на: ${email}
+        `, {
+            parse_mode: 'Markdown',
+            reply_markup: {
+                inline_keyboard: [
+                    [{
+                        text: '🌐 Перейти к оплате',
+                        url: payment.confirmation.confirmation_url
+                    }],
+                    [{
+                        text: '🔄 Проверить оплату',
+                        callback_data: `check_payment:${paymentId}`
+                    }],
+                    [{
+                        text: '❌ Отменить',
+                        callback_data: `cancel_pay:${paymentId}`
+                    }]
+                ]
+            }
+        });
+
+    } catch (error) {
+        console.error('Ошибка в processPaymentWithEmail:', error);
+        await ctx.editMessageText(`
+⚠️ *Ошибка при создании платежа*
+
+Пожалуйста, попробуйте еще раз или обратитесь в техподдержку.
+
+Ошибка: ${error.message}
+        `, { parse_mode: 'Markdown' });
+    }
+}
+
+// Обработчик текстовых сообщений для email
+bot.on('text', async (ctx) => {
+    const userId = ctx.from.id;
+    const session = userSessions.get(userId);
+
+    if (session && session.waitingForEmail) {
+        const email = ctx.message.text.trim();
+        
+        // Простая валидация email
+        if (!email.includes('@') || !email.includes('.')) {
+            await ctx.reply('❌ Неверный формат email. Пожалуйста, введите действительный email:');
+            return;
+        }
+
+        // Удаляем сессию
+        userSessions.delete(userId);
+
+        // Обрабатываем платеж с email
+        await processPaymentWithEmail(ctx, session.paymentId, email);
+    }
+});
 
 // Команда /start с проверкой наличия доступа
 bot.command('start', async (ctx) => {
@@ -237,7 +378,6 @@ bot.command('start', async (ctx) => {
                 }
             });
         }
-
 
         // Проверяем, есть ли уже пользователь в чате
         const isMember = await isUserInChat(userId);
@@ -558,56 +698,10 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
         }
 
         await ctx.editMessageText('🔄 *Обработка платежа...*', { parse_mode: 'Markdown' });
-
-        const createPayload = {
-            amount: { value: '1000.00', currency: 'RUB' },
-            payment_method_data: { type: 'bank_card' },
-            confirmation: {
-                type: 'redirect',
-                return_url: `https://t.me/${ctx.botInfo.username}`
-            },
-            description: `Подписка на сообщество для пользователя ${userId}`,
-            metadata: {
-                userId: userId,
-                paymentId: paymentId,
-                username: ctx.from.username || 'нет username'
-            },
-            capture: true
-        };
-
-        const payment = await checkout.createPayment(createPayload);
         
-        await updatePayment(
-            { _id: paymentId },
-            { 
-                yooId: payment.id,
-                status: 'waiting_for_capture',
-                paymentUrl: payment.confirmation.confirmation_url
-            }
-        );
-
-        await ctx.editMessageText(`
-🔗 *Перейдите на страницу оплаты*
-
-Для завершения оплаты перейдите по ссылке ниже и следуйте инструкциям.
-
-После успешной оплаты вы автоматически получите доступ к сообществу.
-        `, {
-            parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [
-                    [{
-                        text: '🌐 Перейти к оплате',
-                        url: payment.confirmation.confirmation_url
-                    }],
-                    [{
-                        text: '🔄 Проверить оплату',
-                        callback_data: `check_payment:${paymentId}`
-                    }]
-                ]
-            }
-        });
-
+        // Запрашиваем email
+        await askForEmail(ctx, paymentId);
+        
         ctx.answerCbQuery();
     } catch (error) {
         console.error('Ошибка в confirm_pay:', error);
@@ -704,6 +798,11 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
     const userId = ctx.from.id;
 
     try {
+        // Удаляем сессию если есть
+        if (userSessions.has(userId)) {
+            userSessions.delete(userId);
+        }
+
         const paymentData = await getPayment({ _id: paymentId, userId: userId });
         
         if (paymentData?.yooId) {
