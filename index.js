@@ -280,7 +280,7 @@ bot.command('start', async (ctx) => {
 ✔️ Персональные уведомления
 ✔️ Поддержка создателей
 
-Стоимость подписки: *1000 рублей*
+Стоимость подписки: *100 рублей*
         `, {
             reply_markup: {
                 inline_keyboard: [
@@ -506,7 +506,7 @@ bot.action(/init_pay:(.+)/, async (ctx) => {
 🔒 *Подтверждение платежа*
 
 Вы оформляете подписку на наше сообщество:
-▫️ Сумма: *1000 рублей*
+▫️ Сумма: *100 рублей*
 ▫️ Срок: *1 месяц*
 ▫️ Автопродление: *Нет*
 
@@ -617,7 +617,7 @@ bot.on('text', async (ctx) => {
 
         try {
             const createPayload = {
-                amount: { value: '1000.00', currency: 'RUB' },
+                amount: { value: '100.00', currency: 'RUB' },
                 payment_method_data: { type: 'bank_card' },
                 confirmation: {
                     type: 'redirect',
@@ -640,7 +640,7 @@ bot.on('text', async (ctx) => {
                             description: `Подписка на сообщество (1 месяц)`,
                             quantity: "1",
                             amount: {
-                                value: "1000.00",
+                                value: "100.00",
                                 currency: "RUB"
                             },
                             vat_code: 1, // Ставка НДС. 1 - без НДС (согласуйте с бухгалтером!)
@@ -956,7 +956,7 @@ cron.schedule('0 3 * * *', async () => {
     for (const sub of expiringSubs) {
         try {
             const newPayment = await checkout.createPayment({
-                amount: { value: '1000.00', currency: 'RUB' },
+                amount: { value: '100.00', currency: 'RUB' },
                 capture: true,
                 payment_method_id: sub.paymentMethodId,
                 description: `Продление подписки для пользователя ${sub.userId}`,
