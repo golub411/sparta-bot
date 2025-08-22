@@ -29,6 +29,9 @@ let db;
 let paymentsCollection;
 let subscriptionsCollection;
 
+// Объект для хранения состояний пользователей (ожидание email)
+const userStates = {};
+
 async function activateSubscription(userId, paymentInfo) {
     const expiresAt = new Date();
     expiresAt.setMonth(expiresAt.getMonth() + 1); // подписка на 1 месяц
@@ -58,7 +61,6 @@ async function connectToDatabase() {
         
         db = client.db();
         paymentsCollection = db.collection('payments');
-
         subscriptionsCollection = db.collection('subscriptions');
 
         // индексы
@@ -184,7 +186,6 @@ async function addUserToChat(userId) {
     }
 }
 
-
 // Функция для проверки доступа к чату
 async function checkChatAccess() {
     try {
@@ -213,7 +214,6 @@ async function checkChatAccess() {
     }
 }
 
-
 // Проверка подписи уведомлений от ЮКассы
 function verifyNotificationSignature(body, signature, secret) {
     const message = `${body.event}.${body.object.id}`;
@@ -237,7 +237,6 @@ bot.command('start', async (ctx) => {
                 }
             });
         }
-
 
         // Проверяем, есть ли уже пользователь в чате
         const isMember = await isUserInChat(userId);
@@ -535,7 +534,7 @@ bot.action(/init_pay:(.+)/, async (ctx) => {
     }
 });
 
-// Подтверждение платежа
+// Подтверждение платежа (запрос email)
 bot.action(/confirm_pay:(.+)/, async (ctx) => {
     const paymentId = ctx.match[1];
     const userId = ctx.from.id;
@@ -557,61 +556,138 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
             return ctx.answerCbQuery('⚠️ Платеж не найден');
         }
 
-        await ctx.editMessageText('🔄 *Обработка платежа...*', { parse_mode: 'Markdown' });
-
-        const createPayload = {
-            amount: { value: '1000.00', currency: 'RUB' },
-            payment_method_data: { type: 'bank_card' },
-            confirmation: {
-                type: 'redirect',
-                return_url: `https://t.me/${ctx.botInfo.username}`
-            },
-            description: `Подписка на сообщество для пользователя ${userId}`,
-            metadata: {
-                userId: userId,
-                paymentId: paymentId,
-                username: ctx.from.username || 'нет username'
-            },
-            capture: true
-        };
-
-        const payment = await checkout.createPayment(createPayload);
-        
-        await updatePayment(
-            { _id: paymentId },
-            { 
-                yooId: payment.id,
-                status: 'waiting_for_capture',
-                paymentUrl: payment.confirmation.confirmation_url
-            }
-        );
-
         await ctx.editMessageText(`
-🔗 *Перейдите на страницу оплаты*
+📧 *Для оформления чека требуется ваш email*
 
-Для завершения оплаты перейдите по ссылке ниже и следуйте инструкциям.
+Пожалуйста, введите ваш email адрес.
+Он нужен исключительно для отправки чека об оплате и не будет использоваться для спама.
 
-После успешной оплаты вы автоматически получите доступ к сообществу.
+*Введите email:*
         `, {
             parse_mode: 'Markdown',
             reply_markup: {
                 inline_keyboard: [
-                    [{
-                        text: '🌐 Перейти к оплате',
-                        url: payment.confirmation.confirmation_url
-                    }],
-                    [{
-                        text: '🔄 Проверить оплату',
-                        callback_data: `check_payment:${paymentId}`
+                    [{ 
+                        text: '❌ Отменить', 
+                        callback_data: `cancel_pay:${paymentId}` 
                     }]
                 ]
             }
         });
 
+        // Сохраняем состояние, что мы ждем email от этого пользователя для этого платежа
+        userStates[userId] = { waitingForEmail: true, paymentId: paymentId };
+
         ctx.answerCbQuery();
     } catch (error) {
         console.error('Ошибка в confirm_pay:', error);
         ctx.editMessageText('⚠️ *Ошибка при обработке платежа*', { parse_mode: 'Markdown' });
+    }
+});
+
+// Обработка ввода email
+bot.on('text', async (ctx) => {
+    const userId = ctx.from.id;
+    const state = userStates[userId];
+
+    // Если пользователь находится в состоянии "ожидания email"
+    if (state && state.waitingForEmail) {
+        const email = ctx.message.text.trim();
+        const paymentId = state.paymentId;
+
+        // Простая валидация email
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(email)) {
+            return ctx.reply('❌ Это не похоже на корректный email. Пожалуйста, введите email еще раз:');
+        }
+
+        // Удаляем состояние
+        delete userStates[userId];
+
+        // Обновляем данные платежа в БД email
+        await updatePayment(
+            { _id: paymentId },
+            { 
+                userEmail: email // Сохраняем email в базу
+            }
+        );
+
+        // Теперь создаем платеж в ЮKassa, передавая receipt
+        await ctx.reply('🔄 *Создаем платеж...*', { parse_mode: 'Markdown' });
+
+        try {
+            const createPayload = {
+                amount: { value: '1000.00', currency: 'RUB' },
+                payment_method_data: { type: 'bank_card' },
+                confirmation: {
+                    type: 'redirect',
+                    return_url: `https://t.me/${ctx.botInfo.username}`
+                },
+                description: `Подписка на сообщество для пользователя ${userId}`,
+                metadata: {
+                    userId: userId,
+                    paymentId: paymentId,
+                    username: ctx.from.username || 'нет username'
+                },
+                capture: true,
+                // ДОБАВЛЯЕМ ОБЯЗАТЕЛЬНЫЙ receipt ДЛЯ ЧЕКА 54-ФЗ
+                receipt: {
+                    customer: {
+                        email: email // Email, полученный от пользователя
+                    },
+                    items: [
+                        {
+                            description: `Подписка на сообщество (1 месяц)`,
+                            quantity: "1",
+                            amount: {
+                                value: "1000.00",
+                                currency: "RUB"
+                            },
+                            vat_code: 1, // Ставка НДС. 1 - без НДС (согласуйте с бухгалтером!)
+                            payment_mode: 'full_payment',
+                            payment_subject: 'service'
+                        }
+                    ]
+                }
+            };
+
+            const payment = await checkout.createPayment(createPayload);
+            
+            await updatePayment(
+                { _id: paymentId },
+                { 
+                    yooId: payment.id,
+                    status: 'waiting_for_capture',
+                    paymentUrl: payment.confirmation.confirmation_url
+                }
+            );
+
+            await ctx.reply(`
+🔗 *Перейдите на страницу оплаты*
+
+Для завершения оплаты перейдите по ссылке ниже и следуйте инструкциям.
+
+После успешной оплаты вы автоматически получите доступ к сообществу.
+            `, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [{
+                            text: '🌐 Перейти к оплате',
+                            url: payment.confirmation.confirmation_url
+                        }],
+                        [{
+                            text: '🔄 Проверить оплату',
+                            callback_data: `check_payment:${paymentId}`
+                        }]
+                    ]
+                }
+            });
+
+        } catch (error) {
+            console.error('Ошибка при создании платежа с чеком:', error);
+            ctx.reply('⚠️ Произошла ошибка при создании платежа. Попробуйте позже или обратитесь в поддержку.');
+        }
     }
 });
 
@@ -719,6 +795,11 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
             { status: 'cancelled_by_user' }
         );
 
+        // Если пользователь был в состоянии ожидания email, удаляем его
+        if (userStates[userId]) {
+            delete userStates[userId];
+        }
+
         await ctx.editMessageText(`
 🗑 *Платеж отменен*
 
@@ -796,7 +877,7 @@ app.post('/yookassa-webhook', async (req, res) => {
             
             if (result.success) {
                 if (result.alreadyMember) {
-                    message += `✅ Вы уже имеете доступ к сообществу!\n\n`;
+                    message += `✅ Вы уже имеете acceso к сообществу!\n\n`;
                 } else if (result.isOwner) {
                     message += `👑 Вы являетесь владельцем сообщества!\n\n`;
                 } else if (result.link) {
