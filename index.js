@@ -1014,7 +1014,7 @@ bot.on('text', async (ctx) => {
                     username: ctx.from.username || 'нет username'
                 },
                 capture: true,
-                save_payment_method: true,
+                // save_payment_method: true,
                 // ДОБАВЛЯЕМ ОБЯЗАТЕЛЬНЫЙ receipt ДЛЯ ЧЕКА 54-ФЗ
                 receipt: {
                     customer: {
