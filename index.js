@@ -399,7 +399,7 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
 Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
             `, { 
                 parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: [] } // Добавляем пустую клавиатуру
+                reply_markup: { inline_keyboard: [] }
             });
             return ctx.answerCbQuery();
         }
@@ -411,7 +411,7 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
 
         await ctx.editMessageText('🔄 *Создаем счет для оплаты...*', { 
             parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [] } // Добавляем пустую клавиатуру
+            reply_markup: { inline_keyboard: [] }
         });
 
         // Создаем счет в CryptoCloud
@@ -464,9 +464,9 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
 
     } catch (error) {
         console.error('Ошибка в confirm_crypto_pay:', error);
-        ctx.editMessageText('⚠️ *Ошибка при создании счета*', { 
+        await ctx.editMessageText('⚠️ *Ошибка при создании счета*', { 
             parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [] } // Добавляем пустую клавиатуру
+            reply_markup: { inline_keyboard: [] }
         });
     }
 });
@@ -1047,10 +1047,13 @@ bot.action(/check_payment:(.+)/, async (ctx) => {
 ✅ *У вас уже есть доступ к сообществу!*
 
 Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
-            `, { parse_mode: 'Markdown' });
+            `, { 
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: [] }
+            });
             return;
         }
-
+        
         const paymentData = await getPayment({ _id: paymentId, userId: userId });
         if (!paymentData || !paymentData.yooId) {
             throw new Error('Платеж не найден');
@@ -1147,10 +1150,10 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
 Вы можете оформить подписку в любое время, воспользовавшись командой /start
 
 Хорошего дня! ☀️
-`, { 
-    parse_mode: 'Markdown',
-    reply_markup: { inline_keyboard: [] } // Добавляем пустую клавиатуру
-});
+        `, { 
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [] }
+        });
 
         ctx.answerCbQuery();
     } catch (error) {
