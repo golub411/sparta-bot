@@ -5,6 +5,7 @@ const { MongoClient } = require('mongodb');
 const express = require('express');
 const crypto = require('crypto');
 const cron = require('node-cron');
+const CryptoCloudSDK = require('./sdk/CryptoCloudSDK');
 
 // Загружаем администраторов из .env
 const ADMINS = process.env.ADMINS ? process.env.ADMINS.split(',').map(id => id.trim()) : [];
@@ -24,6 +25,9 @@ const checkout = new YooCheckout({
     secretKey: process.env.YOOKASSA_SECRET_KEY
 });
 
+// Инициализация CryptoCloud
+const cryptoCloud = new CryptoCloudSDK(process.env.CRYPTOCLOUD_API_KEY);
+
 // Подключение к MongoDB
 let db;
 let paymentsCollection;
@@ -32,9 +36,9 @@ let subscriptionsCollection;
 // Объект для хранения состояний пользователей (ожидание email)
 const userStates = {};
 
-async function activateSubscription(userId, paymentInfo) {
+async function activateSubscription(userId, paymentInfo, paymentMethod = 'yookassa') {
     const expiresAt = new Date();
-    expiresAt.setMonth(expiresAt.getMonth() + 1); // подписка на 1 месяц
+    expiresAt.setMonth(expiresAt.getMonth() + 1);
 
     await subscriptionsCollection.updateOne(
         { userId },
@@ -44,8 +48,9 @@ async function activateSubscription(userId, paymentInfo) {
                 status: 'active',
                 currentPeriodEnd: expiresAt,
                 autoRenew: true,
-                lastPaymentId: paymentInfo.id,
-                amount: paymentInfo.amount.value,
+                lastPaymentId: paymentInfo.id || paymentInfo.uuid,
+                paymentMethod: paymentMethod,
+                amount: paymentInfo.amount?.value || paymentInfo.amount,
                 updatedAt: new Date()
             }
         },
@@ -67,10 +72,9 @@ async function connectToDatabase() {
         await subscriptionsCollection.createIndex({ userId: 1 }, { unique: true });
         await subscriptionsCollection.createIndex({ status: 1 });
         await subscriptionsCollection.createIndex({ currentPeriodEnd: 1 });
-        
-        // Создаем индексы для оптимизации
         await paymentsCollection.createIndex({ userId: 1 });
         await paymentsCollection.createIndex({ yooId: 1 });
+        await paymentsCollection.createIndex({ cryptoCloudId: 1 });
         await paymentsCollection.createIndex({ status: 1 });
         await paymentsCollection.createIndex({ createdAt: 1 });
         
@@ -222,12 +226,11 @@ function verifyNotificationSignature(body, signature, secret) {
     return signature === hmac.digest('hex');
 }
 
-// Команда /start с проверкой наличия доступа
+// Команда /start с выбором способа оплаты
 bot.command('start', async (ctx) => {
     try {
         const userId = ctx.from.id;
         
-        // Если админ → показываем кнопку для входа в админку
         if (isAdmin(userId)) {
             return ctx.reply('⚙️ Добро пожаловать в панель администратора!', {
                 reply_markup: {
@@ -238,7 +241,6 @@ bot.command('start', async (ctx) => {
             });
         }
 
-        // Проверяем, есть ли уже пользователь в чате
         const isMember = await isUserInChat(userId);
         if (isMember) {
             return ctx.replyWithMarkdown(`
@@ -258,17 +260,6 @@ bot.command('start', async (ctx) => {
             });
         }
         
-        const paymentId = `yk_${Date.now()}_${userId}`;
-
-        await createPayment({
-            _id: paymentId,
-            userId: userId,
-            status: 'pending',
-            username: ctx.from.username || 'нет username',
-            firstName: ctx.from.first_name || '',
-            lastName: ctx.from.last_name || ''
-        });
-
         ctx.replyWithMarkdown(`
 🎉 *Добро пожаловать в наше эксклюзивное сообщество!*
 
@@ -281,12 +272,18 @@ bot.command('start', async (ctx) => {
 ✔️ Поддержка создателей
 
 Стоимость подписки: *100 рублей*
+
+Выберите способ оплаты:
         `, {
             reply_markup: {
                 inline_keyboard: [
                     [{ 
-                        text: '💳 Оплатить подписку', 
-                        callback_data: `init_pay:${paymentId}` 
+                        text: '💳 Банковская карта (ЮKassa)', 
+                        callback_data: 'choose_payment:yookassa' 
+                    }],
+                    [{ 
+                        text: '₿ Криптовалюта (CryptoCloud)', 
+                        callback_data: 'choose_payment:cryptocloud' 
                     }],
                     [{ 
                         text: '❓ Помощь', 
@@ -299,6 +296,341 @@ bot.command('start', async (ctx) => {
     } catch (error) {
         console.error('Ошибка в команде /start:', error);
         ctx.reply('⚠️ Произошла ошибка. Попробуйте позже.');
+    }
+});
+
+// Выбор способа оплаты
+bot.action(/choose_payment:(.+)/, async (ctx) => {
+    const paymentMethod = ctx.match[1];
+    const userId = ctx.from.id;
+    const paymentId = `${paymentMethod}_${Date.now()}_${userId}`;
+
+    try {
+        const isMember = await isUserInChat(userId);
+        if (isMember) {
+            await ctx.editMessageText(`
+✅ *У вас уже есть доступ к сообществу!*
+
+Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
+            `, { parse_mode: 'Markdown' });
+            return ctx.answerCbQuery();
+        }
+
+        await createPayment({
+            _id: paymentId,
+            userId: userId,
+            paymentMethod: paymentMethod,
+            status: 'pending',
+            username: ctx.from.username || 'нет username',
+            firstName: ctx.from.first_name || '',
+            lastName: ctx.from.last_name || ''
+        });
+
+        if (paymentMethod === 'yookassa') {
+            await ctx.editMessageText(`
+🔒 *Оплата банковской картой*
+
+Вы оформляете подписку на наше сообщество:
+▫️ Сумма: *100 рублей*
+▫️ Срок: *1 месяц*
+▫️ Автопродление: *Нет*
+
+Для продолжения подтвердите платеж:
+            `, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ 
+                            text: '✅ Подтвердить оплату', 
+                            callback_data: `confirm_pay:${paymentId}` 
+                        }],
+                        [{ 
+                            text: '❌ Отменить', 
+                            callback_data: `cancel_pay:${paymentId}` 
+                        }]
+                    ]
+                }
+            });
+        } else if (paymentMethod === 'cryptocloud') {
+            await ctx.editMessageText(`
+🔒 *Оплата криптовалютой*
+
+Вы оформляете подписку на наше сообщество:
+▫️ Сумма: *100 рублей* (в эквиваленте)
+▫️ Срок: *1 месяц*
+▫️ Автопродление: *Нет*
+
+Для продолжения подтвердите платеж:
+            `, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ 
+                            text: '✅ Подтвердить оплату', 
+                            callback_data: `confirm_crypto_pay:${paymentId}` 
+                        }],
+                        [{ 
+                            text: '❌ Отменить', 
+                            callback_data: `cancel_pay:${paymentId}` 
+                        }]
+                    ]
+                }
+            });
+        }
+
+        ctx.answerCbQuery();
+    } catch (error) {
+        console.error('Ошибка в choose_payment:', error);
+        ctx.answerCbQuery('⚠️ Произошла ошибка');
+    }
+});
+
+// Подтверждение оплаты криптовалютой
+bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
+    const paymentId = ctx.match[1];
+    const userId = ctx.from.id;
+
+    try {
+        const isMember = await isUserInChat(userId);
+        if (isMember) {
+            await ctx.editMessageText(`
+✅ *У вас уже есть доступ к сообществу!*
+
+Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
+            `, { parse_mode: 'Markdown' });
+            return ctx.answerCbQuery();
+        }
+
+        const paymentData = await getPayment({ _id: paymentId, userId: userId });
+        if (!paymentData) {
+            return ctx.answerCbQuery('⚠️ Платеж не найден');
+        }
+
+        await ctx.editMessageText('🔄 *Создаем счет для оплаты...*', { parse_mode: 'Markdown' });
+
+        // Создаем счет в CryptoCloud
+        const invoiceData = {
+            amount: 100,
+            currency: 'RUB',
+            shop_id: process.env.CRYPTOCLOUD_SHOP_ID,
+            order_id: paymentId,
+            email: ctx.from.username ? `${ctx.from.username}@telegram.org` : `user${userId}@telegram.org`
+        };
+
+        const invoice = await cryptoCloud.createInvoice(invoiceData);
+
+        if (invoice.status === 'success') {
+            await updatePayment(
+                { _id: paymentId },
+                { 
+                    cryptoCloudId: invoice.result.uuid,
+                    status: 'waiting_for_payment',
+                    paymentUrl: invoice.result.pay_url
+                }
+            );
+
+            await ctx.editMessageText(`
+🔗 *Счет для оплаты создан!*
+
+Для оплаты перейдите по ссылке ниже и следуйте инструкциям.
+
+После успешной оплаты вы автоматически получите доступ к сообществу.
+
+⏰ *Счет действителен в течение 15 минут*
+            `, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [{
+                            text: '🌐 Перейти к оплате',
+                            url: invoice.result.pay_url
+                        }],
+                        [{
+                            text: '🔄 Проверить оплату',
+                            callback_data: `check_crypto_payment:${paymentId}`
+                        }]
+                    ]
+                }
+            });
+        } else {
+            throw new Error(invoice.error || 'Ошибка создания счета');
+        }
+
+    } catch (error) {
+        console.error('Ошибка в confirm_crypto_pay:', error);
+        ctx.editMessageText('⚠️ *Ошибка при создании счета*', { parse_mode: 'Markdown' });
+    }
+});
+
+// Проверка крипто-платежа
+bot.action(/check_crypto_payment:(.+)/, async (ctx) => {
+    const paymentId = ctx.match[1];
+    const userId = ctx.from.id;
+
+    try {
+        ctx.answerCbQuery('🔍 Проверяем платеж...');
+        
+        const isMember = await isUserInChat(userId);
+        if (isMember) {
+            await ctx.editMessageText(`
+✅ *У вас уже есть доступ к сообществу!*
+
+Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
+            `, { parse_mode: 'Markdown' });
+            return;
+        }
+
+        const paymentData = await getPayment({ _id: paymentId, userId: userId });
+        if (!paymentData || !paymentData.cryptoCloudId) {
+            throw new Error('Платеж не найден');
+        }
+
+        // Проверяем статус счета в CryptoCloud
+        const invoiceInfo = await cryptoCloud.getInvoiceInfo([paymentData.cryptoCloudId]);
+
+        if (invoiceInfo.status === 'success' && invoiceInfo.result[0]?.status === 'paid') {
+            const invoice = invoiceInfo.result[0];
+            const result = await addUserToChat(userId);
+
+            await updatePayment(
+                { _id: paymentId },
+                { 
+                    status: 'completed',
+                    paidAt: new Date(),
+                    amount: invoice.amount
+                }
+            );
+            
+            await activateSubscription(userId, invoice, 'cryptocloud');
+
+            let message = `🎉 *Оплата успешно завершена!*\n\n`;
+            
+            if (result.success) {
+                if (result.alreadyMember) {
+                    message += `✅ Вы уже имеете доступ к сообществу!\n\n`;
+                } else if (result.isOwner) {
+                    message += `👑 Вы являетесь владельцем сообщества!\n\n`;
+                } else if (result.link) {
+                    message += `Вот ваша персональная ссылка для доступа:\n${result.link}\n\n`;
+                } else {
+                    message += `✅ Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
+                }
+                
+                message += `📌 *Важно:* Не передавайте доступ другим пользователям!`;
+                
+                await ctx.editMessageText(message, {
+                    parse_mode: 'Markdown',
+                    reply_markup: result.link ? {
+                        inline_keyboard: [
+                            [{ text: '📌 Моя подписка', callback_data: 'mysub' }],
+                            [{ text: '🚀 Перейти в сообщество', url: result.link }],
+                            [{ text: '💬 Техподдержка', url: 'https://t.me/golube123' }]
+                        ]
+                    } : null
+                });
+            } else {
+                await ctx.editMessageText(`
+✅ *Оплата успешно завершена!*
+
+Однако возникла проблема с доступом к сообществу. Пожалуйста, свяжитесь с техподдержкой.
+                `, { parse_mode: 'Markdown' });
+            }
+
+        } else {
+            ctx.answerCbQuery('⏳ Платеж еще не завершен', { show_alert: true });
+        }
+
+    } catch (error) {
+        console.error('Ошибка в check_crypto_payment:', error);
+        ctx.answerCbQuery('⚠️ Ошибка при проверке платежа', { show_alert: true });
+    }
+});
+
+// Вебхук для CryptoCloud
+app.post('/cryptocloud-webhook', async (req, res) => {
+    try {
+        const webhookData = req.body;
+        const invoiceId = webhookData.invoice_id;
+        
+        if (webhookData.status === 'paid') {
+            const paymentData = await getPayment({ cryptoCloudId: invoiceId });
+            if (!paymentData) {
+                return res.status(404).send('Payment not found');
+            }
+
+            const userId = paymentData.userId;
+            const isMember = await isUserInChat(userId);
+            
+            if (isMember) {
+                await updatePayment(
+                    { cryptoCloudId: invoiceId },
+                    {
+                        status: 'already_member',
+                        paidAt: new Date(),
+                        amount: webhookData.amount,
+                        updatedAt: new Date()
+                    }
+                );
+                
+                await bot.telegram.sendMessage(userId, `
+✅ *Оплата успешно завершена!*
+
+У вас уже есть доступ к сообществу. Если возникли проблемы, обратитесь в техподдержку.
+                `, { parse_mode: 'Markdown' });
+                
+                return res.status(200).send();
+            }
+
+            const result = await addUserToChat(userId);
+
+            await updatePayment(
+                { cryptoCloudId: invoiceId },
+                {
+                    status: 'completed',
+                    paidAt: new Date(),
+                    amount: webhookData.amount,
+                    updatedAt: new Date()
+                }
+            );
+
+            await activateSubscription(userId, webhookData, 'cryptocloud');
+
+            let message = `🎉 *Оплата успешно завершена!*\n\n`;
+            
+            if (result.success) {
+                if (result.alreadyMember) {
+                    message += `✅ Вы уже имеете acceso к сообществу!\n\n`;
+                } else if (result.isOwner) {
+                    message += `👑 Вы являетесь владельцем сообщества!\n\n`;
+                } else if (result.link) {
+                    message += `Вот ваша персональная ссылка для доступа:\n${result.link}\n\n`;
+                } else {
+                    message += `✅ Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
+                }
+                
+                message += `📌 *Важно:* Не передавайте доступ другим пользователям!`;
+                
+                await bot.telegram.sendMessage(userId, message, {
+                    parse_mode: 'Markdown',
+                    reply_markup: result.link ? {
+                        inline_keyboard: [
+                            [{ text: '🚀 Перейти в сообщество', url: result.link }]
+                        ]
+                    } : null
+                });
+            } else {
+                await bot.telegram.sendMessage(userId, `
+✅ *Оплата успешно завершена!*
+
+Однако возникла проблема с доступом к сообществу. Пожалуйста, свяжитесь с техподдержкой.
+                `, { parse_mode: 'Markdown' });
+            }
+        }
+
+        res.status(200).send();
+    } catch (error) {
+        console.error('Ошибка в CryptoCloud вебхуке:', error);
+        res.status(500).send();
     }
 });
 
