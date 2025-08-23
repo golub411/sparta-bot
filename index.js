@@ -397,7 +397,10 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
 ✅ *У вас уже есть доступ к сообществу!*
 
 Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
-            `, { parse_mode: 'Markdown' });
+            `, { 
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: [] } // Добавляем пустую клавиатуру
+            });
             return ctx.answerCbQuery();
         }
 
@@ -406,7 +409,10 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
             return ctx.answerCbQuery('⚠️ Платеж не найден');
         }
 
-        await ctx.editMessageText('🔄 *Создаем счет для оплаты...*', { parse_mode: 'Markdown' });
+        await ctx.editMessageText('🔄 *Создаем счет для оплаты...*', { 
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [] } // Добавляем пустую клавиатуру
+        });
 
         // Создаем счет в CryptoCloud
         const invoiceData = {
@@ -458,7 +464,10 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
 
     } catch (error) {
         console.error('Ошибка в confirm_crypto_pay:', error);
-        ctx.editMessageText('⚠️ *Ошибка при создании счета*', { parse_mode: 'Markdown' });
+        ctx.editMessageText('⚠️ *Ошибка при создании счета*', { 
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [] } // Добавляем пустую клавиатуру
+        });
     }
 });
 
@@ -1138,7 +1147,10 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
 Вы можете оформить подписку в любое время, воспользовавшись командой /start
 
 Хорошего дня! ☀️
-        `, { parse_mode: 'Markdown' });
+`, { 
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: [] } // Добавляем пустую клавиатуру
+});
 
         ctx.answerCbQuery();
     } catch (error) {
