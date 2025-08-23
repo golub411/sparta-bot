@@ -393,18 +393,19 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
     try {
         const isMember = await isUserInChat(userId);
         if (isMember) {
-            await ctx.editMessageText(`
-✅ *У вас уже есть доступ к сообществу!*
+            await ctx.editMessageText(
+                `✅ *У вас уже есть доступ к сообществу!*
 
-Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
-            `, { 
-                parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: [] }
-            });
+Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.`,
+                { 
+                    parse_mode: 'Markdown',
+                    reply_markup: { inline_keyboard: [] }
+                }
+            );
             return ctx.answerCbQuery();
         }
 
-        const paymentData = await getPayment({ _id: paymentId, userId: userId });
+        const paymentData = await getPayment({ _id: paymentId, userId });
         if (!paymentData) {
             return ctx.answerCbQuery('⚠️ Платеж не найден');
         }
@@ -420,12 +421,14 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
             currency: 'RUB',
             shop_id: process.env.CRYPTOCLOUD_SHOP_ID,
             order_id: paymentId,
-            email: ctx.from.username ? `${ctx.from.username}@telegram.org` : `user${userId}@telegram.org`
+            email: ctx.from.username 
+                ? `${ctx.from.username}@telegram.org` 
+                : `user${userId}@telegram.org`
         };
 
         const invoice = await cryptoCloud.createInvoice(invoiceData);
 
-        if (invoice.status === 'success') {
+        if (invoice.status === 'success' && invoice.result?.pay_url) {
             await updatePayment(
                 { _id: paymentId },
                 { 
@@ -435,29 +438,30 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
                 }
             );
 
-            await ctx.editMessageText(`
-🔗 *Счет для оплаты создан!*
+            await ctx.editMessageText(
+                `🔗 *Счет для оплаты создан!*
 
 Для оплаты перейдите по ссылке ниже и следуйте инструкциям.
 
 После успешной оплаты вы автоматически получите доступ к сообществу.
 
-⏰ *Счет действителен в течение 15 минут*
-            `, {
-                parse_mode: 'Markdown',
-                reply_markup: {
-                    inline_keyboard: [
-                        [{
-                            text: '🌐 Перейти к оплате',
-                            url: invoice.result.pay_url
-                        }],
-                        [{
-                            text: '🔄 Проверить оплату',
-                            callback_data: `check_crypto_payment:${paymentId}`
-                        }]
-                    ]
+⏰ *Счет действителен в течение 15 минут*`,
+                {
+                    parse_mode: 'Markdown',
+                    reply_markup: {
+                        inline_keyboard: [
+                            [{
+                                text: '🌐 Перейти к оплате',
+                                url: invoice.result.pay_url
+                            }],
+                            [{
+                                text: '🔄 Проверить оплату',
+                                callback_data: `check_crypto_payment:${paymentId}`
+                            }]
+                        ]
+                    }
                 }
-            });
+            );
         } else {
             throw new Error(invoice.error || 'Ошибка создания счета');
         }
@@ -1053,7 +1057,7 @@ bot.action(/check_payment:(.+)/, async (ctx) => {
             });
             return;
         }
-        
+
         const paymentData = await getPayment({ _id: paymentId, userId: userId });
         if (!paymentData || !paymentData.yooId) {
             throw new Error('Платеж не найден');
