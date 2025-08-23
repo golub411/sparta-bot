@@ -448,13 +448,15 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
             const invoice = await cryptoCloud.createInvoice(invoiceData);
             console.log('CryptoCloud response:', invoice);
 
-            if (invoice.status === 'success' && invoice.result?.pay_url) {
+            if (invoice.status === 'success' && (invoice.result?.pay_url || invoice.result?.link)) {
+                const paymentUrl = invoice.result.pay_url || invoice.result.link;
+                
                 await updatePayment(
                     { _id: paymentId },
                     { 
                         cryptoCloudId: invoice.result.uuid,
                         status: 'waiting_for_payment',
-                        paymentUrl: invoice.result.pay_url,
+                        paymentUrl: paymentUrl,
                         userEmail: userEmail
                     }
                 );
@@ -467,7 +469,7 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
                             inline_keyboard: [
                                 [{
                                     text: '🌐 Перейти к оплате',
-                                    url: invoice.result.pay_url
+                                    url: paymentUrl
                                 }],
                                 [{
                                     text: '🔄 Проверить оплату',
@@ -478,7 +480,7 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
                     }
                 );
             } else {
-                // Более детальная обработка ошибок от CryptoCloud
+                // Обработка ошибки
                 const errorMessage = invoice.error || invoice.message || 'Неизвестная ошибка создания счета';
                 console.error('CryptoCloud error details:', invoice);
                 throw new Error(`Ошибка CryptoCloud: ${errorMessage}`);
@@ -600,7 +602,7 @@ bot.action(/check_crypto_payment:(.+)/, async (ctx) => {
 app.post('/cryptocloud-webhook', async (req, res) => {
     try {
         const webhookData = req.body;
-        const invoiceId = webhookData.invoice_id;
+        const invoiceId = webhookData.invoice_id || webhookData.uuid;
         
         if (webhookData.status === 'paid') {
             const paymentData = await getPayment({ cryptoCloudId: invoiceId });
