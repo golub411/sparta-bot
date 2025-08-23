@@ -394,9 +394,7 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
         const isMember = await isUserInChat(userId);
         if (isMember) {
             await ctx.editMessageText(
-                `✅ *У вас уже есть доступ к сообществу!*
-
-Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.`,
+                `✅ *У вас уже есть доступ к сообществу!*\n\nОплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.`,
                 { 
                     parse_mode: 'Markdown',
                     reply_markup: { inline_keyboard: [] }
@@ -415,63 +413,102 @@ bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
             reply_markup: { inline_keyboard: [] }
         });
 
-        // Создаем счет в CryptoCloud
+        // Получаем email пользователя или создаем заглушку
+        let userEmail;
+        if (ctx.from.username) {
+            userEmail = `${ctx.from.username}@telegram.org`;
+        } else {
+            // Генерируем уникальный email на основе ID и времени
+            userEmail = `user${userId}_${Date.now()}@telegram.org`;
+        }
+
+        // Создаем счет в CryptoCloud с правильными параметрами
         const invoiceData = {
             amount: 100,
             currency: 'RUB',
             shop_id: process.env.CRYPTOCLOUD_SHOP_ID,
             order_id: paymentId,
-            email: ctx.from.username 
-                ? `${ctx.from.username}@telegram.org` 
-                : `user${userId}@telegram.org`
+            email: userEmail,
+            // Добавляем дополнительные рекомендуемые параметры
+            description: `Подписка на сообщество для пользователя ${userId}`,
+            // Указываем валюту, в которой выставляется счет (может отличаться от валюты оплаты)
+            invoice_currency: 'RUB',
+            // Добавляем информацию о пользователе
+            user_data: {
+                user_id: userId.toString(),
+                username: ctx.from.username || 'unknown',
+                first_name: ctx.from.first_name || '',
+                last_name: ctx.from.last_name || ''
+            }
         };
 
-        const invoice = await cryptoCloud.createInvoice(invoiceData);
+        console.log('Creating CryptoCloud invoice with data:', invoiceData);
 
-        if (invoice.status === 'success' && invoice.result?.pay_url) {
-            await updatePayment(
-                { _id: paymentId },
-                { 
-                    cryptoCloudId: invoice.result.uuid,
-                    status: 'waiting_for_payment',
-                    paymentUrl: invoice.result.pay_url
-                }
-            );
+        try {
+            const invoice = await cryptoCloud.createInvoice(invoiceData);
+            console.log('CryptoCloud response:', invoice);
 
-            await ctx.editMessageText(
-                `🔗 *Счет для оплаты создан!*
-
-Для оплаты перейдите по ссылке ниже и следуйте инструкциям.
-
-После успешной оплаты вы автоматически получите доступ к сообществу.
-
-⏰ *Счет действителен в течение 15 минут*`,
-                {
-                    parse_mode: 'Markdown',
-                    reply_markup: {
-                        inline_keyboard: [
-                            [{
-                                text: '🌐 Перейти к оплате',
-                                url: invoice.result.pay_url
-                            }],
-                            [{
-                                text: '🔄 Проверить оплату',
-                                callback_data: `check_crypto_payment:${paymentId}`
-                            }]
-                        ]
+            if (invoice.status === 'success' && invoice.result?.pay_url) {
+                await updatePayment(
+                    { _id: paymentId },
+                    { 
+                        cryptoCloudId: invoice.result.uuid,
+                        status: 'waiting_for_payment',
+                        paymentUrl: invoice.result.pay_url,
+                        userEmail: userEmail
                     }
-                }
-            );
-        } else {
-            throw new Error(invoice.error || 'Ошибка создания счета');
+                );
+
+                await ctx.editMessageText(
+                    `🔗 *Счет для оплаты создан!*\n\nДля оплаты перейдите по ссылке ниже и следуйте инструкциям.\n\nПосле успешной оплаты вы автоматически получите доступ к сообществу.\n\n⏰ *Счет действителен в течение 15 минут*`,
+                    {
+                        parse_mode: 'Markdown',
+                        reply_markup: {
+                            inline_keyboard: [
+                                [{
+                                    text: '🌐 Перейти к оплате',
+                                    url: invoice.result.pay_url
+                                }],
+                                [{
+                                    text: '🔄 Проверить оплату',
+                                    callback_data: `check_crypto_payment:${paymentId}`
+                                }]
+                            ]
+                        }
+                    }
+                );
+            } else {
+                // Более детальная обработка ошибок от CryptoCloud
+                const errorMessage = invoice.error || invoice.message || 'Неизвестная ошибка создания счета';
+                console.error('CryptoCloud error details:', invoice);
+                throw new Error(`Ошибка CryptoCloud: ${errorMessage}`);
+            }
+
+        } catch (apiError) {
+            console.error('CryptoCloud API error:', apiError);
+            throw new Error(`Ошибка API CryptoCloud: ${apiError.message}`);
         }
 
     } catch (error) {
-        console.error('Ошибка в confirm_crypto_pay:', error);
-        await ctx.editMessageText('⚠️ *Ошибка при создании счета*', { 
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [] }
-        });
+        console.error('Полная ошибка в confirm_crypto_pay:', error);
+        await ctx.editMessageText(
+            `⚠️ *Ошибка при создании счета*\n\n${error.message || 'Неизвестная ошибка'}\n\nПожалуйста, попробуйте другой способ оплаты или обратитесь в поддержку.`,
+            { 
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ 
+                            text: '💳 Оплатить картой', 
+                            callback_data: `choose_payment:yookassa` 
+                        }],
+                        [{ 
+                            text: '💬 Техподдержка', 
+                            url: 'https://t.me/golube123' 
+                        }]
+                    ]
+                }
+            }
+        );
     }
 });
 
