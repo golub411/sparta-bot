@@ -1,4 +1,4 @@
-export class CryptoCloudSDK {
+class CryptoCloudSDK {
   constructor(apiKey) {
     this.apiKey = apiKey;
     this.baseUrl = "https://api.cryptocloud.plus/v2/";
