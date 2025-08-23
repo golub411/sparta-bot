@@ -1,3 +1,4 @@
+// CryptoCloudSDK.js
 class CryptoCloudSDK {
   constructor(apiKey) {
     this.apiKey = apiKey;
@@ -52,3 +53,5 @@ class CryptoCloudSDK {
     });
   }
 }
+
+module.exports = CryptoCloudSDK;
