@@ -286,6 +286,10 @@ bot.command('start', async (ctx) => {
                         callback_data: 'choose_payment:cryptocloud' 
                     }],
                     [{ 
+                        text: '📃 Оферта',
+                        callback_data: 'show_oferta' 
+                    }],
+                    [{ 
                         text: '❓ Помощь', 
                         url: 'https://t.me/golube123' 
                     }]
@@ -382,6 +386,16 @@ bot.action(/choose_payment:(.+)/, async (ctx) => {
     } catch (error) {
         console.error('Ошибка в choose_payment:', error);
         ctx.answerCbQuery('⚠️ Произошла ошибка');
+    }
+});
+
+bot.action('show_oferta', async (ctx) => {
+    try {
+        await ctx.answerCbQuery();
+        await ctx.replyWithDocument({ source: './oferta.txt' });
+    } catch (error) {
+        console.error('Ошибка отправки оферты:', error);
+        await ctx.reply('⚠️ Оферта временно недоступна');
     }
 });
 
