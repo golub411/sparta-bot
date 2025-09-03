@@ -1180,6 +1180,7 @@ bot.on('text', async (ctx) => {
                         [{
                             text: '🌐 Перейти к оплате',
                             // url: payment.confirmation.confirmation_url
+                            url: 'https://robokassa.com/'
                         }],
                         [{
                             text: '🔄 Проверить оплату',
