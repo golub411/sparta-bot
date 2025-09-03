@@ -280,7 +280,6 @@ bot.command('start', async (ctx) => {
             reply_markup: {
                 inline_keyboard: [
                     [{ 
-                        // text: '💳 Банковская карта (ЮKassa)', 
                         text: '💳 Банковская карта', 
                         callback_data: 'choose_payment:yookassa' 
                     }],
@@ -330,33 +329,35 @@ bot.action(/choose_payment:(.+)/, async (ctx) => {
             status: 'pending',
             username: ctx.from.username || 'нет username',
             firstName: ctx.from.first_name || '',
-            lastName: ctx.from.last_name || '',
-            isRecurring: false // по умолчанию false
+            lastName: ctx.from.last_name || ''
         });
 
         if (paymentMethod === 'yookassa') {
+            // Новый шаг - запрос разрешения на рекуррентные платежи
             await ctx.editMessageText(`
 🔒 *Оплата банковской картой*
 
 Вы оформляете подписку на наше сообщество:
 ▫️ Сумма: *100 рублей*
 ▫️ Срок: *1 месяц*
-▫️ Автопродление: *Да, после подтверждения*
+▫️ Автопродление: *Доступно*
 
-Для удобства мы используем рекуррентные платежи. Это позволит автоматически продлевать подписку каждый месяц без повторного ввода данных.
+Для вашего удобства мы предлагаем автоматическое продление подписки. В конце каждого месяца оплата будет списываться автоматически с вашей карты.
 
-*Хотите включить автопродление?*
+Вы можете отключить автопродление в любое время в настройках подписки.
+
+*Хотите включить автоматическое продление подписки?*
             `, {
                 parse_mode: 'Markdown',
                 reply_markup: {
                     inline_keyboard: [
                         [{ 
                             text: '✅ Да, включить автопродление', 
-                            callback_data: `set_recurring:true:${paymentId}` 
+                            callback_data: `recurring_yes:${paymentId}` 
                         }],
                         [{ 
                             text: '❌ Нет, только разовый платеж', 
-                            callback_data: `set_recurring:false:${paymentId}` 
+                            callback_data: `recurring_no:${paymentId}` 
                         }],
                         [{ 
                             text: '🔙 Назад к выбору оплаты', 
@@ -366,13 +367,14 @@ bot.action(/choose_payment:(.+)/, async (ctx) => {
                 }
             });
         } else if (paymentMethod === 'cryptocloud') {
+            // Для криптовалюты автопродление недоступно
             await ctx.editMessageText(`
 🔒 *Оплата криптовалютой*
 
 Вы оформляете подписку на наше сообщество:
 ▫️ Сумма: *100 рублей* (в эквиваленте)
 ▫️ Срок: *1 месяц*
-▫️ Автопродление: *Нет* (для криптовалют недоступно)
+▫️ Автопродление: *Недоступно*
 
 Для продолжения подтвердите платеж:
             `, {
@@ -399,29 +401,30 @@ bot.action(/choose_payment:(.+)/, async (ctx) => {
     }
 });
 
-// Обработчик выбора типа платежа (рекуррентный/разовый)
-bot.action(/set_recurring:(true|false):(.+)/, async (ctx) => {
-    const isRecurring = ctx.match[1] === 'true';
+// Обработка выбора автопродления
+bot.action(/recurring_(yes|no):(.+)/, async (ctx) => {
+    const recurringChoice = ctx.match[1]; // "yes" или "no"
     const paymentId = ctx.match[2];
     const userId = ctx.from.id;
-
+    
     try {
-        // Обновляем запись о платеже
-        await updatePayment(paymentId, { isRecurring });
-
-        const paymentText = isRecurring 
-            ? '✅ *Автопродление включено*\n\nПодписка будет автоматически продлеваться каждый месяц. Вы можете отключить это в любой момент в настройках платежей.'
-            : '⚠️ *Автопродление отключено*\n\nПодписка будет активна только 1 месяц. Для продления потребуется совершить платеж повторно.';
-
+        // Сохраняем выбор пользователя в базе данных
+        await updatePayment(
+            { _id: paymentId },
+            { 
+                recurring: recurringChoice === 'yes',
+                updatedAt: new Date()
+            }
+        );
+        
+        // Переходим к подтверждению оплаты
         await ctx.editMessageText(`
 🔒 *Оплата банковской картой*
 
 Вы оформляете подписку на наше сообщество:
 ▫️ Сумма: *100 рублей*
 ▫️ Срок: *1 месяц*
-▫️ Автопродление: *${isRecurring ? 'Да' : 'Нет'}*
-
-${paymentText}
+▫️ Автопродление: *${recurringChoice === 'yes' ? 'Да' : 'Нет'}*
 
 Для продолжения подтвердите платеж:
         `, {
@@ -433,22 +436,62 @@ ${paymentText}
                         callback_data: `confirm_pay:${paymentId}` 
                     }],
                     [{ 
-                        text: '🔄 Изменить тип платежа', 
-                        callback_data: `choose_payment:yookassa` 
-                    }],
-                    [{ 
                         text: '❌ Отменить', 
                         callback_data: `cancel_pay:${paymentId}` 
                     }]
                 ]
             }
         });
-
+        
         ctx.answerCbQuery();
     } catch (error) {
-        console.error('Ошибка в set_recurring:', error);
+        console.error('Ошибка в обработке выбора автопродления:', error);
         ctx.answerCbQuery('⚠️ Произошла ошибка');
     }
+});
+
+// Возврат к выбору способа оплаты
+bot.action('back_to_payment_methods', async (ctx) => {
+    await ctx.editMessageText(`
+🎉 *Добро пожаловать в наше эксклюзивное сообщество!*
+
+Для доступа к закрытому контенту оформите подписку на 1 месяц.
+
+💎 *Преимущества подписки:*
+✔️ Доступ к эксклюзивным материалам
+✔️ Закрытые обсуждения
+✔️ Персональные уведомления
+✔️ Поддержка создателей
+
+Стоимость подписки: *100 рублей*
+
+Выберите способ оплаты
+
+продолжая вы соглашаетесь с офертой:
+    `, {
+        parse_mode: 'Markdown',
+        reply_markup: {
+            inline_keyboard: [
+                [{ 
+                    text: '💳 Банковская карта', 
+                    callback_data: 'choose_payment:yookassa' 
+                }],
+                [{ 
+                    text: '₿ Криптовалюта (CryptoCloud)', 
+                    callback_data: 'choose_payment:cryptocloud' 
+                }],
+                [{ 
+                    text: '📃 Оферта',
+                    callback_data: 'show_oferta' 
+                }],
+                [{ 
+                    text: '❓ Помощь', 
+                    url: 'https://t.me/golube123' 
+                }]
+            ]
+        }
+    });
+    ctx.answerCbQuery();
 });
 
 
@@ -1017,14 +1060,11 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
             return ctx.answerCbQuery('⚠️ Платеж не найден');
         }
 
-        // Проверяем, включены ли рекуррентные платежи
-        const isRecurring = paymentData.isRecurring === true;
-
         await ctx.editMessageText(`
-📧 *Для оформления ${isRecurring ? 'рекуррентного платежа' : 'чека'} требуется ваш email*
+📧 *Для оформления чека требуется ваш email*
 
 Пожалуйста, введите ваш email адрес.
-Он нужен ${isRecurring ? 'для сохранения метода оплаты и отправки чеков' : 'исключительно для отправки чека об оплате'} и не будет использоваться для спама.
+Он нужен исключительно для отправки чека об оплате и не будет использоваться для спама.
 
 *Введите email:*
         `, {
@@ -1040,11 +1080,7 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
         });
 
         // Сохраняем состояние, что мы ждем email от этого пользователя для этого платежа
-        userStates[userId] = { 
-            waitingForEmail: true, 
-            paymentId: paymentId,
-            isRecurring: isRecurring 
-        };
+        userStates[userId] = { waitingForEmail: true, paymentId: paymentId };
 
         ctx.answerCbQuery();
     } catch (error) {
@@ -1053,7 +1089,7 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
     }
 });
 
-// Обработка ввода email - ОБНОВЛЕННАЯ ВЕРСИЯ
+// Обработка ввода email
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
     const state = userStates[userId];
@@ -1062,7 +1098,6 @@ bot.on('text', async (ctx) => {
     if (state && state.waitingForEmail) {
         const email = ctx.message.text.trim();
         const paymentId = state.paymentId;
-        const isRecurring = state.isRecurring;
 
         // Простая валидация email
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -1096,12 +1131,10 @@ bot.on('text', async (ctx) => {
                 metadata: {
                     userId: userId,
                     paymentId: paymentId,
-                    username: ctx.from.username || 'нет username',
-                    isRecurring: isRecurring // Добавляем информацию о типе платежа
+                    username: ctx.from.username || 'нет username'
                 },
                 capture: true,
-                // Включаем сохранение метода оплаты для рекуррентных платежей
-                save_payment_method: isRecurring,
+                // save_payment_method: true,
                 // ДОБАВЛЯЕМ ОБЯЗАТЕЛЬНЫЙ receipt ДЛЯ ЧЕКА 54-ФЗ
                 receipt: {
                     customer: {
@@ -1115,7 +1148,7 @@ bot.on('text', async (ctx) => {
                                 value: "100.00",
                                 currency: "RUB"
                             },
-                            vat_code: 1, // Ставка НДС. 1 - без НДС
+                            vat_code: 1, // Ставка НДС. 1 - без НДС (согласуйте с бухгалтером!)
                             payment_mode: 'full_payment',
                             payment_subject: 'service'
                         }
@@ -1130,19 +1163,17 @@ bot.on('text', async (ctx) => {
                 { 
                     yooId: payment.id,
                     status: 'waiting_for_capture',
-                    paymentUrl: payment.confirmation.confirmation_url,
-                    // Сохраняем ID метода оплаты, если это рекуррентный платеж
-                    ...(isRecurring && payment.payment_method && {
-                        paymentMethodId: payment.payment_method.id
-                    })
+                    paymentUrl: payment.confirmation.confirmation_url
                 }
             );
 
-            const messageText = isRecurring 
-                ? `🔗 *Перейдите на страницу оплаты*\n\nДля завершения оплаты перейдите по ссылке ниже. После успешной оплаты:\n• Вы получите доступ к сообществу\n• *Будет включено автопродление*\n• Подписка будет автоматически продлеваться каждый месяц`
-                : `🔗 *Перейдите на страницу оплаты*\n\nДля завершения оплаты перейдите по ссылке ниже и следуйте инструкциям.\n\nПосле успешной оплаты вы автоматически получите доступ к сообществу.`;
+            await ctx.reply(`
+🔗 *Перейдите на страницу оплаты*
 
-            await ctx.reply(messageText, {
+Для завершения оплаты перейдите по ссылке ниже и следуйте инструкциям.
+
+После успешной оплаты вы автоматически получите доступ к сообществу.
+            `, {
                 parse_mode: 'Markdown',
                 reply_markup: {
                     inline_keyboard: [
@@ -1295,7 +1326,7 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
     }
 });
 
-// Вебхук для ЮКассы - ОБНОВЛЕННАЯ ВЕРСИЯ
+// Вебхук для ЮКассы
 app.post('/yookassa-webhook', async (req, res) => {
     try {
         const signature = req.headers['content-signature'];
@@ -1311,7 +1342,6 @@ app.post('/yookassa-webhook', async (req, res) => {
         if (notification.event === 'payment.succeeded') {
             const paymentId = payment.metadata.paymentId;
             const userId = parseInt(payment.metadata.userId);
-            const isRecurring = payment.metadata.isRecurring === 'true';
 
             const paymentData = await getPayment({ _id: paymentId, userId: userId });
             if (!paymentData) {
@@ -1348,15 +1378,11 @@ app.post('/yookassa-webhook', async (req, res) => {
                     status: 'completed',
                     paidAt: new Date(),
                     amount: payment.amount.value,
-                    updatedAt: new Date(),
-                    // Сохраняем ID метода оплаты для рекуррентных платежей
-                    ...(isRecurring && payment.payment_method && {
-                        paymentMethodId: payment.payment_method.id
-                    })
+                    updatedAt: new Date()
                 }
             );
 
-            await activateSubscription(userId, payment, 'yookassa');
+            await activateSubscription(userId, payment);
 
             let message = `🎉 *Оплата успешно завершена!*\n\n`;
             
@@ -1371,22 +1397,13 @@ app.post('/yookassa-webhook', async (req, res) => {
                     message += `✅ Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
                 }
                 
-                // Добавляем информацию о типе платежа
-                if (isRecurring) {
-                    message += `💰 *Автопродление включено:* Подписка будет автоматически продлеваться каждый месяц.\n\n`;
-                } else {
-                    message += `ℹ️ *Одноразовый платеж:* Для продления потребуется оплатить снова через месяц.\n\n`;
-                }
-                
                 message += `📌 *Важно:* Не передавайте доступ другим пользователям!`;
                 
                 await bot.telegram.sendMessage(userId, message, {
                     parse_mode: 'Markdown',
                     reply_markup: result.link ? {
                         inline_keyboard: [
-                            [{ text: '📌 Моя подписка', callback_data: 'mysub' }],
-                            [{ text: '🚀 Перейти в сообщество', url: result.link }],
-                            [{ text: '💬 Техподдержка', url: 'https://t.me/golube123' }]
+                            [{ text: '🚀 Перейти в сообщество', url: result.link }]
                         ]
                     } : null
                 });
@@ -1406,36 +1423,6 @@ app.post('/yookassa-webhook', async (req, res) => {
     }
 });
 
-// Функция активации подписки - ОБНОВЛЕННАЯ ВЕРСИЯ
-async function activateSubscription(userId, paymentInfo, paymentMethod = 'yookassa') {
-    const expiresAt = new Date();
-    expiresAt.setMonth(expiresAt.getMonth() + 1);
-
-    // Определяем, включено ли автопродление
-    const isRecurring = paymentInfo.metadata?.isRecurring === 'true' || 
-                       paymentMethod === 'cryptocloud' ? false : true; // Для крипты всегда false
-
-    await subscriptionsCollection.updateOne(
-        { userId },
-        {
-            $set: {
-                userId,
-                status: 'active',
-                currentPeriodEnd: expiresAt,
-                autoRenew: isRecurring, // Устанавливаем флаг автопродления
-                lastPaymentId: paymentInfo.id || paymentInfo.uuid,
-                paymentMethod: paymentMethod,
-                amount: paymentInfo.amount?.value || paymentInfo.amount,
-                // Сохраняем ID метода оплаты для рекуррентных платежей
-                ...(isRecurring && paymentInfo.payment_method && {
-                    paymentMethodId: paymentInfo.payment_method.id
-                }),
-                updatedAt: new Date()
-            }
-        },
-        { upsert: true }
-    );
-}
 // Запуск приложения
 async function startApp() {
     try {
