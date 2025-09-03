@@ -283,10 +283,10 @@ bot.command('start', async (ctx) => {
                         text: '💳 Банковская карта', 
                         callback_data: 'choose_payment:yookassa' 
                     }],
-                    [{ 
-                        text: '₿ Криптовалюта (CryptoCloud)', 
-                        callback_data: 'choose_payment:cryptocloud' 
-                    }],
+                    // [{ 
+                    //     text: '₿ Криптовалюта (CryptoCloud)', 
+                    //     callback_data: 'choose_payment:cryptocloud' 
+                    // }],
                     [{ 
                         text: '📃 Оферта',
                         callback_data: 'show_oferta' 
