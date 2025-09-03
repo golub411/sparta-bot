@@ -1179,7 +1179,7 @@ bot.on('text', async (ctx) => {
                     inline_keyboard: [
                         [{
                             text: '🌐 Перейти к оплате',
-                            url: payment.confirmation.confirmation_url
+                            // url: payment.confirmation.confirmation_url
                         }],
                         [{
                             text: '🔄 Проверить оплату',
