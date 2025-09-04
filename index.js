@@ -1,11 +1,10 @@
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
-const { YooCheckout } = require('@a2seven/yoo-checkout');
 const { MongoClient } = require('mongodb');
 const express = require('express');
 const crypto = require('crypto');
 const cron = require('node-cron');
-const CryptoCloudSDK = require('./sdk/CryptoCloudSDK');
+const CryptoJS = require('crypto-js');
 
 // Загружаем администраторов из .env
 const ADMINS = process.env.ADMINS ? process.env.ADMINS.split(',').map(id => id.trim()) : [];
@@ -19,24 +18,21 @@ function isAdmin(userId) {
 const app = express();
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
-// Инициализация YooKassa
-const checkout = new YooCheckout({
-    shopId: process.env.YOOKASSA_SHOP_ID,
-    secretKey: process.env.YOOKASSA_SECRET_KEY
-});
-
-// Инициализация CryptoCloud
-const cryptoCloud = new CryptoCloudSDK(process.env.CRYPTOCLOUD_API_KEY);
+// Конфигурация Robokassa
+const ROBOKASSA_LOGIN = process.env.ROBOKASSA_LOGIN;
+const ROBOKASSA_PASS1 = process.env.ROBOKASSA_PASS1; // Пароль 1 для создания платежей
+const ROBOKASSA_PASS2 = process.env.ROBOKASSA_PASS2; // Пароль 2 для проверки вебхуков
+const ROBOKASSA_TEST_MODE = process.env.ROBOKASSA_TEST_MODE === 'true';
 
 // Подключение к MongoDB
 let db;
 let paymentsCollection;
 let subscriptionsCollection;
 
-// Объект для хранения состояний пользователей (ожидание email)
+// Объект для хранения состояний пользователей
 const userStates = {};
 
-async function activateSubscription(userId, paymentInfo, paymentMethod = 'yookassa') {
+async function activateSubscription(userId, paymentInfo, paymentMethod = 'robokassa') {
     const expiresAt = new Date();
     expiresAt.setMonth(expiresAt.getMonth() + 1);
 
@@ -47,10 +43,10 @@ async function activateSubscription(userId, paymentInfo, paymentMethod = 'yookas
                 userId,
                 status: 'active',
                 currentPeriodEnd: expiresAt,
-                autoRenew: true,
-                lastPaymentId: paymentInfo.id || paymentInfo.uuid,
+                autoRenew: false, // Robokassa не поддерживает автоматическое списание
+                lastPaymentId: paymentInfo.InvId || paymentInfo.paymentId,
                 paymentMethod: paymentMethod,
-                amount: paymentInfo.amount?.value || paymentInfo.amount,
+                amount: paymentInfo.OutSum,
                 updatedAt: new Date()
             }
         },
@@ -73,8 +69,7 @@ async function connectToDatabase() {
         await subscriptionsCollection.createIndex({ status: 1 });
         await subscriptionsCollection.createIndex({ currentPeriodEnd: 1 });
         await paymentsCollection.createIndex({ userId: 1 });
-        await paymentsCollection.createIndex({ yooId: 1 });
-        await paymentsCollection.createIndex({ cryptoCloudId: 1 });
+        await paymentsCollection.createIndex({ robokassaId: 1 });
         await paymentsCollection.createIndex({ status: 1 });
         await paymentsCollection.createIndex({ createdAt: 1 });
         
@@ -218,12 +213,42 @@ async function checkChatAccess() {
     }
 }
 
-// Проверка подписи уведомлений от ЮКассы
-function verifyNotificationSignature(body, signature, secret) {
-    const message = `${body.event}.${body.object.id}`;
-    const hmac = crypto.createHmac('sha256', secret);
-    hmac.update(message);
-    return signature === hmac.digest('hex');
+// Генерация подписи для Robokassa
+function generateRobokassaSignature(OutSum, InvId, customParams = {}) {
+    // Формируем строку для подписи: MerchantLogin:OutSum:InvId:Пароль1
+    let signatureString = `${ROBOKASSA_LOGIN}:${OutSum}:${InvId}:${ROBOKASSA_PASS1}`;
+    
+    // Добавляем пользовательские параметры, если они есть
+    if (Object.keys(customParams).length > 0) {
+        const paramsString = Object.entries(customParams)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, value]) => `${key}=${value}`)
+            .join(':');
+        signatureString += `:${paramsString}`;
+    }
+    
+    // Создаем MD5 хеш
+    return crypto.createHash('md5').update(signatureString).digest('hex');
+}
+
+// Проверка подписи уведомлений от Robokassa
+function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = {}) {
+    // Формируем строку для проверки подписи: OutSum:InvId:Пароль2
+    let signatureString = `${OutSum}:${InvId}:${ROBOKASSA_PASS2}`;
+    
+    // Добавляем пользовательские параметры, если они есть
+    if (Object.keys(customParams).length > 0) {
+        const paramsString = Object.entries(customParams)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, value]) => `${key}=${value}`)
+            .join(':');
+        signatureString += `:${paramsString}`;
+    }
+    
+    // Создаем MD5 хеш
+    const mySignature = crypto.createHash('md5').update(signatureString).digest('hex');
+    
+    return mySignature.toLowerCase() === SignatureValue.toLowerCase();
 }
 
 // Команда /start с выбором способа оплаты
@@ -280,13 +305,9 @@ bot.command('start', async (ctx) => {
             reply_markup: {
                 inline_keyboard: [
                     [{ 
-                        text: '💳 Банковская карта', 
-                        callback_data: 'choose_payment:yookassa' 
+                        text: '💳 Банковская карта (Robokassa)', 
+                        callback_data: 'choose_payment:robokassa' 
                     }],
-                    // [{ 
-                    //     text: '₿ Криптовалюта (CryptoCloud)', 
-                    //     callback_data: 'choose_payment:cryptocloud' 
-                    // }],
                     [{ 
                         text: '📃 Оферта',
                         callback_data: 'show_oferta' 
@@ -332,47 +353,12 @@ bot.action(/choose_payment:(.+)/, async (ctx) => {
             lastName: ctx.from.last_name || ''
         });
 
-        if (paymentMethod === 'yookassa') {
-            // Новый шаг - запрос разрешения на рекуррентные платежи
+        if (paymentMethod === 'robokassa') {
             await ctx.editMessageText(`
-🔒 *Оплата банковской картой*
+🔒 *Оплата банковской картой через Robokassa*
 
 Вы оформляете подписку на наше сообщество:
 ▫️ Сумма: *100 рублей*
-▫️ Срок: *1 месяц*
-▫️ Автопродление: *Доступно*
-
-Для вашего удобства мы предлагаем автоматическое продление подписки. В конце каждого месяца оплата будет списываться автоматически с вашей карты.
-
-Вы можете отключить автопродление в любое время в настройках подписки.
-
-*Хотите включить автоматическое продление подписки?*
-            `, {
-                parse_mode: 'Markdown',
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ 
-                            text: '✅ Да, включить автопродление', 
-                            callback_data: `recurring_yes:${paymentId}` 
-                        }],
-                        [{ 
-                            text: '❌ Нет, только разовый платеж', 
-                            callback_data: `recurring_no:${paymentId}` 
-                        }],
-                        [{ 
-                            text: '🔙 Назад к выбору оплаты', 
-                            callback_data: 'back_to_payment_methods' 
-                        }]
-                    ]
-                }
-            });
-        } else if (paymentMethod === 'cryptocloud') {
-            // Для криптовалюты автопродление недоступно
-            await ctx.editMessageText(`
-🔒 *Оплата криптовалютой*
-
-Вы оформляете подписку на наше сообщество:
-▫️ Сумма: *100 рублей* (в эквиваленте)
 ▫️ Срок: *1 месяц*
 ▫️ Автопродление: *Недоступно*
 
@@ -383,7 +369,7 @@ bot.action(/choose_payment:(.+)/, async (ctx) => {
                     inline_keyboard: [
                         [{ 
                             text: '✅ Подтвердить оплату', 
-                            callback_data: `confirm_crypto_pay:${paymentId}` 
+                            callback_data: `confirm_pay:${paymentId}` 
                         }],
                         [{ 
                             text: '❌ Отменить', 
@@ -401,247 +387,13 @@ bot.action(/choose_payment:(.+)/, async (ctx) => {
     }
 });
 
-// Обработка выбора автопродления
-bot.action(/recurring_(yes|no):(.+)/, async (ctx) => {
-    const recurringChoice = ctx.match[1]; // "yes" или "no"
-    const paymentId = ctx.match[2];
-    const userId = ctx.from.id;
-    
-    try {
-        // Сохраняем выбор пользователя в базе данных
-        await updatePayment(
-            { _id: paymentId },
-            { 
-                recurring: recurringChoice === 'yes',
-                updatedAt: new Date()
-            }
-        );
-        
-        // Переходим к подтверждению оплаты
-        await ctx.editMessageText(`
-🔒 *Оплата банковской картой*
-
-Вы оформляете подписку на наше сообщество:
-▫️ Сумма: *100 рублей*
-▫️ Срок: *1 месяц*
-▫️ Автопродление: *${recurringChoice === 'yes' ? 'Да' : 'Нет'}*
-
-Для продолжения подтвердите платеж:
-        `, {
-            parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [
-                    [{ 
-                        text: '✅ Подтвердить оплату', 
-                        callback_data: `confirm_pay:${paymentId}` 
-                    }],
-                    [{ 
-                        text: '❌ Отменить', 
-                        callback_data: `cancel_pay:${paymentId}` 
-                    }]
-                ]
-            }
-        });
-        
-        ctx.answerCbQuery();
-    } catch (error) {
-        console.error('Ошибка в обработке выбора автопродления:', error);
-        ctx.answerCbQuery('⚠️ Произошла ошибка');
-    }
-});
-
-// Возврат к выбору способа оплаты
-bot.action('back_to_payment_methods', async (ctx) => {
-    await ctx.editMessageText(`
-🎉 *Добро пожаловать в наше эксклюзивное сообщество!*
-
-Для доступа к закрытому контенту оформите подписку на 1 месяц.
-
-💎 *Преимущества подписки:*
-✔️ Доступ к эксклюзивным материалам
-✔️ Закрытые обсуждения
-✔️ Персональные уведомления
-✔️ Поддержка создателей
-
-Стоимость подписки: *100 рублей*
-
-Выберите способ оплаты
-
-продолжая вы соглашаетесь с офертой:
-    `, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-            inline_keyboard: [
-                [{ 
-                    text: '💳 Банковская карта', 
-                    callback_data: 'choose_payment:yookassa' 
-                }],
-                [{ 
-                    text: '₿ Криптовалюта (CryptoCloud)', 
-                    callback_data: 'choose_payment:cryptocloud' 
-                }],
-                [{ 
-                    text: '📃 Оферта',
-                    callback_data: 'show_oferta' 
-                }],
-                [{ 
-                    text: '❓ Помощь', 
-                    url: 'https://t.me/golube123' 
-                }]
-            ]
-        }
-    });
-    ctx.answerCbQuery();
-});
-
-
-bot.action('show_oferta', async (ctx) => {
-    try {
-        await ctx.answerCbQuery();
-        await ctx.replyWithDocument({ source: './oferta.txt' });
-    } catch (error) {
-        console.error('Ошибка отправки оферты:', error);
-        await ctx.reply('⚠️ Оферта временно недоступна');
-    }
-});
-
-// Подтверждение оплаты криптовалютой
-bot.action(/confirm_crypto_pay:(.+)/, async (ctx) => {
+// Обработка кнопки "Оплатить"
+bot.action(/confirm_pay:(.+)/, async (ctx) => {
     const paymentId = ctx.match[1];
     const userId = ctx.from.id;
 
     try {
-        const isMember = await isUserInChat(userId);
-        if (isMember) {
-            await ctx.editMessageText(
-                `✅ *У вас уже есть доступ к сообществу!*\n\nОплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.`,
-                { 
-                    parse_mode: 'Markdown',
-                    reply_markup: { inline_keyboard: [] }
-                }
-            );
-            return ctx.answerCbQuery();
-        }
-
-        const paymentData = await getPayment({ _id: paymentId, userId });
-        if (!paymentData) {
-            return ctx.answerCbQuery('⚠️ Платеж не найден');
-        }
-
-        await ctx.editMessageText('🔄 *Создаем счет для оплаты...*', { 
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [] }
-        });
-
-        // Получаем email пользователя или создаем заглушку
-        let userEmail;
-        if (ctx.from.username) {
-            userEmail = `${ctx.from.username}@telegram.org`;
-        } else {
-            // Генерируем уникальный email на основе ID и времени
-            userEmail = `user${userId}_${Date.now()}@telegram.org`;
-        }
-
-        // Создаем счет в CryptoCloud с правильными параметрами
-        const invoiceData = {
-            amount: 100,
-            currency: 'RUB',
-            shop_id: process.env.CRYPTOCLOUD_SHOP_ID,
-            order_id: paymentId,
-            email: userEmail,
-            // Добавляем дополнительные рекомендуемые параметры
-            description: `Подписка на сообщество для пользователя ${userId}`,
-            // Указываем валюту, в которой выставляется счет (может отличаться от валюты оплаты)
-            invoice_currency: 'RUB',
-            // Добавляем информацию о пользователе
-            user_data: {
-                user_id: userId.toString(),
-                username: ctx.from.username || 'unknown',
-                first_name: ctx.from.first_name || '',
-                last_name: ctx.from.last_name || ''
-            }
-        };
-
-        console.log('Creating CryptoCloud invoice with data:', invoiceData);
-
-        try {
-            const invoice = await cryptoCloud.createInvoice(invoiceData);
-            console.log('CryptoCloud response:', invoice);
-
-            if (invoice.status === 'success' && (invoice.result?.pay_url || invoice.result?.link)) {
-                const paymentUrl = invoice.result.pay_url || invoice.result.link;
-                
-                await updatePayment(
-                    { _id: paymentId },
-                    { 
-                        cryptoCloudId: invoice.result.uuid,
-                        status: 'waiting_for_payment',
-                        paymentUrl: paymentUrl,
-                        userEmail: userEmail
-                    }
-                );
-
-                await ctx.editMessageText(
-                    `🔗 *Счет для оплаты создан!*\n\nДля оплаты перейдите по ссылке ниже и следуйте инструкциям.\n\nПосле успешной оплаты вы автоматически получите доступ к сообществу.\n\n⏰ *Счет действителен в течение 15 минут*`,
-                    {
-                        parse_mode: 'Markdown',
-                        reply_markup: {
-                            inline_keyboard: [
-                                [{
-                                    text: '🌐 Перейти к оплате',
-                                    url: paymentUrl
-                                }],
-                                [{
-                                    text: '🔄 Проверить оплату',
-                                    callback_data: `check_crypto_payment:${paymentId}`
-                                }]
-                            ]
-                        }
-                    }
-                );
-            } else {
-                // Обработка ошибки
-                const errorMessage = invoice.error || invoice.message || 'Неизвестная ошибка создания счета';
-                console.error('CryptoCloud error details:', invoice);
-                throw new Error(`Ошибка CryptoCloud: ${errorMessage}`);
-            }
-
-        } catch (apiError) {
-            console.error('CryptoCloud API error:', apiError);
-            throw new Error(`Ошибка API CryptoCloud: ${apiError.message}`);
-        }
-
-    } catch (error) {
-        console.error('Полная ошибка в confirm_crypto_pay:', error);
-        await ctx.editMessageText(
-            `⚠️ *Ошибка при создании счета*\n\n${error.message || 'Неизвестная ошибка'}\n\nПожалуйста, попробуйте другой способ оплаты или обратитесь в поддержку.`,
-            { 
-                parse_mode: 'Markdown',
-                reply_markup: {
-                    inline_keyboard: [
-                        [{ 
-                            text: '💳 Оплатить картой', 
-                            callback_data: `choose_payment:yookassa` 
-                        }],
-                        [{ 
-                            text: '💬 Техподдержка', 
-                            url: 'https://t.me/golube123' 
-                        }]
-                    ]
-                }
-            }
-        );
-    }
-});
-
-// Проверка крипто-платежа
-bot.action(/check_crypto_payment:(.+)/, async (ctx) => {
-    const paymentId = ctx.match[1];
-    const userId = ctx.from.id;
-
-    try {
-        ctx.answerCbQuery('🔍 Проверяем платеж...');
-        
+        // Проверяем, есть ли уже доступ
         const isMember = await isUserInChat(userId);
         if (isMember) {
             await ctx.editMessageText(`
@@ -649,32 +401,106 @@ bot.action(/check_crypto_payment:(.+)/, async (ctx) => {
 
 Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
             `, { parse_mode: 'Markdown' });
+            return ctx.answerCbQuery();
+        }
+
+        const paymentData = await getPayment({ _id: paymentId, userId: userId });
+        if (!paymentData) {
+            return ctx.answerCbQuery('⚠️ Платеж не найден');
+        }
+
+        await ctx.editMessageText('🔄 *Создаем платеж...*', { 
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [] }
+        });
+
+        // Генерируем подпись для Robokassa
+        const OutSum = '100.00';
+        const InvId = paymentId;
+        const description = `Подписка на сообщество для пользователя ${userId}`;
+        
+        const signature = generateRobokassaSignature(OutSum, InvId, {
+            user_id: userId,
+            description: encodeURIComponent(description)
+        });
+
+        // Формируем URL для оплаты
+        const baseUrl = ROBOKASSA_TEST_MODE 
+            ? 'https://auth.robokassa.ru/Merchant/Index.aspx'
+            : 'https://auth.robokassa.ru/Merchant/Index.aspx';
+            
+        const paymentUrl = `${baseUrl}?MerchantLogin=${ROBOKASSA_LOGIN}&OutSum=${OutSum}&InvId=${InvId}&Description=${encodeURIComponent(description)}&SignatureValue=${signature}&IsTest=${ROBOKASSA_TEST_MODE ? 1 : 0}`;
+
+        await updatePayment(
+            { _id: paymentId },
+            { 
+                robokassaId: InvId,
+                status: 'waiting_for_payment',
+                paymentUrl: paymentUrl,
+                amount: OutSum
+            }
+        );
+
+        await ctx.editMessageText(`
+🔗 *Перейдите на страницу оплаты*
+
+Для завершения оплаты перейдите по ссылке ниже и следуйте инструкциям.
+
+После успешной оплаты вы автоматически получите доступ к сообществу.
+        `, {
+            parse_mode: 'Markdown',
+            reply_markup: {
+                inline_keyboard: [
+                    [{
+                        text: '🌐 Перейти к оплате',
+                        url: paymentUrl
+                    }],
+                    [{
+                        text: '🔄 Проверить оплату',
+                        callback_data: `check_payment:${paymentId}`
+                    }]
+                ]
+            }
+        });
+
+    } catch (error) {
+        console.error('Ошибка в confirm_pay:', error);
+        ctx.editMessageText('⚠️ *Ошибка при создании платежа*', { parse_mode: 'Markdown' });
+    }
+});
+
+// Проверка платежа
+bot.action(/check_payment:(.+)/, async (ctx) => {
+    const paymentId = ctx.match[1];
+    const userId = ctx.from.id;
+
+    try {
+        ctx.answerCbQuery('🔍 Проверяем платеж...');
+        
+        // Проверяем, есть ли уже доступ
+        const isMember = await isUserInChat(userId);
+        if (isMember) {
+            await ctx.editMessageText(`
+✅ *У вас уже есть доступ к сообществу!*
+
+Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
+            `, { 
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: [] }
+            });
             return;
         }
 
         const paymentData = await getPayment({ _id: paymentId, userId: userId });
-        if (!paymentData || !paymentData.cryptoCloudId) {
+        if (!paymentData) {
             throw new Error('Платеж не найден');
         }
 
-        // Проверяем статус счета в CryptoCloud
-        const invoiceInfo = await cryptoCloud.getInvoiceInfo([paymentData.cryptoCloudId]);
-
-        if (invoiceInfo.status === 'success' && invoiceInfo.result[0]?.status === 'paid') {
-            const invoice = invoiceInfo.result[0];
+        // В Robokassa нет API для проверки статуса, поэтому мы можем только проверить
+        // статус в нашей базе данных (обновляется через вебхук)
+        if (paymentData.status === 'completed') {
             const result = await addUserToChat(userId);
-
-            await updatePayment(
-                { _id: paymentId },
-                { 
-                    status: 'completed',
-                    paidAt: new Date(),
-                    amount: invoice.amount
-                }
-            );
             
-            await activateSubscription(userId, invoice, 'cryptocloud');
-
             let message = `🎉 *Оплата успешно завершена!*\n\n`;
             
             if (result.success) {
@@ -707,106 +533,139 @@ bot.action(/check_crypto_payment:(.+)/, async (ctx) => {
 Однако возникла проблема с доступом к сообществу. Пожалуйста, свяжитесь с техподдержкой.
                 `, { parse_mode: 'Markdown' });
             }
-
         } else {
             ctx.answerCbQuery('⏳ Платеж еще не завершен', { show_alert: true });
         }
 
     } catch (error) {
-        console.error('Ошибка в check_crypto_payment:', error);
+        console.error('Ошибка в check_payment:', error);
         ctx.answerCbQuery('⚠️ Ошибка при проверке платежа', { show_alert: true });
     }
 });
 
-// Вебхук для CryptoCloud
-app.post('/cryptocloud-webhook', async (req, res) => {
+// Отмена платежа
+bot.action(/cancel_pay:(.+)/, async (ctx) => {
+    const paymentId = ctx.match[1];
+    const userId = ctx.from.id;
+
     try {
-        const webhookData = req.body;
-        const invoiceId = webhookData.invoice_id || webhookData.uuid;
-        
-        if (webhookData.status === 'paid') {
-            const paymentData = await getPayment({ cryptoCloudId: invoiceId });
-            if (!paymentData) {
-                return res.status(404).send('Payment not found');
-            }
+        await updatePayment(
+            { _id: paymentId },
+            { status: 'cancelled_by_user' }
+        );
 
-            const userId = paymentData.userId;
-            const isMember = await isUserInChat(userId);
-            
-            if (isMember) {
-                await updatePayment(
-                    { cryptoCloudId: invoiceId },
-                    {
-                        status: 'already_member',
-                        paidAt: new Date(),
-                        amount: webhookData.amount,
-                        updatedAt: new Date()
-                    }
-                );
-                
-                await bot.telegram.sendMessage(userId, `
-✅ *Оплата успешно завершена!*
+        await ctx.editMessageText(`
+🗑 *Платеж отменен*
 
-У вас уже есть доступ к сообществу. Если возникли проблемы, обратитесь в техподдержку.
-                `, { parse_mode: 'Markdown' });
-                
-                return res.status(200).send();
-            }
+Вы можете оформить подписку в любое время, воспользовавшись командой /start
 
-            const result = await addUserToChat(userId);
+Хорошего дня! ☀️
+        `, { 
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [] }
+        });
 
-            await updatePayment(
-                { cryptoCloudId: invoiceId },
-                {
-                    status: 'completed',
-                    paidAt: new Date(),
-                    amount: webhookData.amount,
-                    updatedAt: new Date()
-                }
-            );
-
-            await activateSubscription(userId, webhookData, 'cryptocloud');
-
-            let message = `🎉 *Оплата успешно завершена!*\n\n`;
-            
-            if (result.success) {
-                if (result.alreadyMember) {
-                    message += `✅ Вы уже имеете acceso к сообществу!\n\n`;
-                } else if (result.isOwner) {
-                    message += `👑 Вы являетесь владельцем сообщества!\n\n`;
-                } else if (result.link) {
-                    message += `Вот ваша персональная ссылка для доступа:\n${result.link}\n\n`;
-                } else {
-                    message += `✅ Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
-                }
-                
-                message += `📌 *Важно:* Не передавайте доступ другим пользователям!`;
-                
-                await bot.telegram.sendMessage(userId, message, {
-                    parse_mode: 'Markdown',
-                    reply_markup: result.link ? {
-                        inline_keyboard: [
-                            [{ text: '🚀 Перейти в сообщество', url: result.link }]
-                        ]
-                    } : null
-                });
-            } else {
-                await bot.telegram.sendMessage(userId, `
-✅ *Оплата успешно завершена!*
-
-Однако возникла проблема с доступом к сообществу. Пожалуйста, свяжитесь с техподдержкой.
-                `, { parse_mode: 'Markdown' });
-            }
-        }
-
-        res.status(200).send();
+        ctx.answerCbQuery();
     } catch (error) {
-        console.error('Ошибка в CryptoCloud вебхуке:', error);
-        res.status(500).send();
+        console.error('Ошибка в cancel_pay:', error);
+        ctx.answerCbQuery('⚠️ Ошибка при отмене платежа');
     }
 });
 
-// Главная панель
+// Вебхук для Robokassa
+app.get('/robokassa-webhook', async (req, res) => {
+    try {
+        const { OutSum, InvId, SignatureValue, ...customParams } = req.query;
+        
+        // Проверяем подпись
+        if (!verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams)) {
+            console.error('Неверная подпись уведомления от Robokassa');
+            return res.status(401).send('bad sign');
+        }
+
+        // Ищем платеж в базе
+        const paymentData = await getPayment({ _id: InvId });
+        if (!paymentData) {
+            return res.status(404).send('Payment not found');
+        }
+
+        const userId = paymentData.userId;
+
+        // Проверяем, есть ли уже доступ
+        const isMember = await isUserInChat(userId);
+        if (isMember) {
+            await updatePayment(
+                { _id: InvId },
+                {
+                    status: 'already_member',
+                    paidAt: new Date(),
+                    amount: OutSum,
+                    updatedAt: new Date()
+                }
+            );
+            
+            await bot.telegram.sendMessage(userId, `
+✅ *Оплата успешно завершена!*
+
+У вас уже есть доступ к сообществу. Если возникли проблемы, обратитесь в техподдержку.
+            `, { parse_mode: 'Markdown' });
+            
+            return res.send(`OK${InvId}`);
+        }
+
+        const result = await addUserToChat(userId);
+
+        await updatePayment(
+            { _id: InvId },
+            {
+                status: 'completed',
+                paidAt: new Date(),
+                amount: OutSum,
+                updatedAt: new Date()
+            }
+        );
+
+        await activateSubscription(userId, { OutSum, InvId }, 'robokassa');
+
+        let message = `🎉 *Оплата успешно завершена!*\n\n`;
+        
+        if (result.success) {
+            if (result.alreadyMember) {
+                message += `✅ Вы уже имеете acceso к сообществу!\n\n`;
+            } else if (result.isOwner) {
+                message += `👑 Вы являетесь владельцем сообщества!\n\n`;
+            } else if (result.link) {
+                message += `Вот ваша персональная ссылка для доступа:\n${result.link}\n\n`;
+            } else {
+                message += `✅ Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
+            }
+            
+            message += `📌 *Важно:* Не передавайте доступ другим пользователям!`;
+            
+            await bot.telegram.sendMessage(userId, message, {
+                parse_mode: 'Markdown',
+                reply_markup: result.link ? {
+                    inline_keyboard: [
+                        [{ text: '🚀 Перейти в сообщество', url: result.link }]
+                    ]
+                } : null
+            });
+        } else {
+            await bot.telegram.sendMessage(userId, `
+✅ *Оплата успешно завершена!*
+
+Однако возникла проблема с доступом к сообществу. Пожалуйста, свяжитесь с техподдержку.
+            `, { parse_mode: 'Markdown' });
+        }
+
+        res.send(`OK${InvId}`);
+    } catch (error) {
+        console.error('Ошибка в Robokassa вебхуке:', error);
+        res.status(500).send('error');
+    }
+});
+
+// Главная панель администратора
 bot.action('admin_panel', async (ctx) => {
     if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('⛔ Нет доступа');
 
@@ -837,76 +696,6 @@ bot.action('admin_users', async (ctx) => {
         reply_markup: {
             inline_keyboard: [
                 [{ text: '⬅️ Назад', callback_data: 'admin_panel' }]
-            ]
-        }
-    });
-});
-
-bot.action("mysub", async (ctx) => {
-    const sub = await subscriptionsCollection.findOne({ userId: ctx.from.id });
-    if (!sub) {
-        return ctx.editMessageText("❌ У вас нет активной подписки");
-    }
-
-    await ctx.editMessageText(`
-📌 *Информация о подписке*
-Статус: ${sub.status}
-Автопродление: ${sub.autoRenew ? "✅ Включено" : "❌ Отключено"}
-Действует до: ${sub.currentPeriodEnd.toLocaleDateString()}
-    `, {
-        parse_mode: "Markdown",
-        reply_markup: {
-            inline_keyboard: [
-                [{ 
-                    text: sub.autoRenew ? "❌ Отключить автопродление" : "🔄 Включить автопродление", 
-                    callback_data: "toggle_autorenew" 
-                }],
-                [{ text: "⬅️ Назад", callback_data: "back_to_start" }]
-            ]
-        }
-    });
-});
-
-bot.action("toggle_autorenew", async (ctx) => {
-    const sub = await subscriptionsCollection.findOne({ userId: ctx.from.id });
-    if (!sub) return ctx.answerCbQuery("❌ Подписка не найдена");
-
-    const newStatus = !sub.autoRenew;
-    await subscriptionsCollection.updateOne(
-        { userId: ctx.from.id },
-        { $set: { autoRenew: newStatus, updatedAt: new Date() } }
-    );
-
-    await ctx.editMessageText(`
-📌 *Информация о подписке*
-Статус: ${sub.status}
-Автопродление: ${newStatus ? "✅ Включено" : "❌ Отключено"}
-Действует до: ${sub.currentPeriodEnd.toLocaleDateString()}
-    `, {
-        parse_mode: "Markdown",
-        reply_markup: {
-            inline_keyboard: [
-                [{ 
-                    text: newStatus ? "❌ Отключить автопродление" : "🔄 Включить автопродление", 
-                    callback_data: "toggle_autorenew" 
-                }],
-                [{ text: "⬅️ Назад", callback_data: "back_to_start" }]
-            ]
-        }
-    });
-});
-
-bot.action("back_to_start", async (ctx) => {
-    await ctx.editMessageText(`
-✅ *Вы уже имеете доступ к нашему сообществу!*
-
-Если у вас возникли проблемы с доступом, обратитесь в техподдержку.
-    `, {
-        parse_mode: "Markdown",
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: "📌 Моя подписка", callback_data: "mysub" }],
-                [{ text: "💬 Техподдержка", url: "https://t.me/golube123" }]
             ]
         }
     });
@@ -979,449 +768,58 @@ bot.action('admin_stats', async (ctx) => {
     });
 });
 
-// Выход
+// Выход из админки
 bot.action('admin_exit', async (ctx) => {
     await ctx.editMessageText('✅ Вы вышли из админки');
 });
 
-// Обработка кнопки "Оплатить"
-bot.action(/init_pay:(.+)/, async (ctx) => {
-    const paymentId = ctx.match[1];
-    const userId = ctx.from.id;
-
+// Показать оферту
+bot.action('show_oferta', async (ctx) => {
     try {
-        // Проверяем, есть ли уже доступ
-        const isMember = await isUserInChat(userId);
-        if (isMember) {
-            await ctx.editMessageText(`
-✅ *У вас уже есть доступ к сообществу!*
-
-Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
-            `, { parse_mode: 'Markdown' });
-            return ctx.answerCbQuery();
-        }
-
-        const paymentData = await getPayment({ _id: paymentId, userId: userId });
-        if (!paymentData) {
-            return ctx.answerCbQuery('⚠️ Платеж не найден');
-        }
-
-        await ctx.editMessageText(`
-🔒 *Подтверждение платежа*
-
-Вы оформляете подписку на наше сообщество:
-▫️ Сумма: *100 рублей*
-▫️ Срок: *1 месяц*
-▫️ Автопродление: *Нет*
-
-Для продолжения подтвердите платеж:
-        `, {
-            parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [
-                    [{ 
-                        text: '✅ Подтвердить оплату', 
-                        callback_data: `confirm_pay:${paymentId}` 
-                    }],
-                    [{ 
-                        text: '❌ Отменить', 
-                        callback_data: `cancel_pay:${paymentId}` 
-                    }]
-                ]
-            }
-        });
-
-        ctx.answerCbQuery();
+        await ctx.answerCbQuery();
+        await ctx.replyWithDocument({ source: './oferta.txt' });
     } catch (error) {
-        console.error('Ошибка в init_pay:', error);
-        ctx.answerCbQuery('⚠️ Произошла ошибка');
+        console.error('Ошибка отправки оферты:', error);
+        await ctx.reply('⚠️ Оферта временно недоступна');
     }
 });
 
-// Подтверждение платежа (запрос email)
-bot.action(/confirm_pay:(.+)/, async (ctx) => {
-    const paymentId = ctx.match[1];
-    const userId = ctx.from.id;
-
-    try {
-        // Проверяем, есть ли уже доступ
-        const isMember = await isUserInChat(userId);
-        if (isMember) {
-            await ctx.editMessageText(`
-✅ *У вас уже есть доступ к сообществу!*
-
-Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
-            `, { parse_mode: 'Markdown' });
-            return ctx.answerCbQuery();
-        }
-
-        const paymentData = await getPayment({ _id: paymentId, userId: userId });
-        if (!paymentData) {
-            return ctx.answerCbQuery('⚠️ Платеж не найден');
-        }
-
-        await ctx.editMessageText(`
-📧 *Для оформления чека требуется ваш email*
-
-Пожалуйста, введите ваш email адрес.
-Он нужен исключительно для отправки чека об оплате и не будет использоваться для спама.
-
-*Введите email:*
-        `, {
-            parse_mode: 'Markdown',
-            reply_markup: {
-                inline_keyboard: [
-                    [{ 
-                        text: '❌ Отменить', 
-                        callback_data: `cancel_pay:${paymentId}` 
-                    }]
-                ]
-            }
-        });
-
-        // Сохраняем состояние, что мы ждем email от этого пользователя для этого платежа
-        userStates[userId] = { waitingForEmail: true, paymentId: paymentId };
-
-        ctx.answerCbQuery();
-    } catch (error) {
-        console.error('Ошибка в confirm_pay:', error);
-        ctx.editMessageText('⚠️ *Ошибка при обработке платежа*', { parse_mode: 'Markdown' });
+// Информация о подписке
+bot.action("mysub", async (ctx) => {
+    const sub = await subscriptionsCollection.findOne({ userId: ctx.from.id });
+    if (!sub) {
+        return ctx.editMessageText("❌ У вас нет активной подписки");
     }
+
+    await ctx.editMessageText(`
+📌 *Информация о подписке*
+Статус: ${sub.status}
+Действует до: ${sub.currentPeriodEnd.toLocaleDateString()}
+    `, {
+        parse_mode: "Markdown",
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: "⬅️ Назад", callback_data: "back_to_start" }]
+            ]
+        }
+    });
 });
 
-// Обработка ввода email
-bot.on('text', async (ctx) => {
-    const userId = ctx.from.id;
-    const state = userStates[userId];
+// Возврат к началу
+bot.action("back_to_start", async (ctx) => {
+    await ctx.editMessageText(`
+✅ *Вы уже имеете доступ к нашему сообществу!*
 
-    // Если пользователь находится в состоянии "ожидания email"
-    if (state && state.waitingForEmail) {
-        const email = ctx.message.text.trim();
-        const paymentId = state.paymentId;
-
-        // Простая валидация email
-        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(email)) {
-            return ctx.reply('❌ Это не похоже на корректный email. Пожалуйста, введите email еще раз:');
+Если у вас возникли проблемы с доступом, обратитесь в техподдержку.
+    `, {
+        parse_mode: "Markdown",
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: "📌 Моя подписка", callback_data: "mysub" }],
+                [{ text: "💬 Техподдержка", url: "https://t.me/golube123" }]
+            ]
         }
-
-        // Удаляем состояние
-        delete userStates[userId];
-
-        // Обновляем данные платежа в БД email
-        await updatePayment(
-            { _id: paymentId },
-            { 
-                userEmail: email // Сохраняем email в базу
-            }
-        );
-
-        // Теперь создаем платеж в ЮKassa, передавая receipt
-        await ctx.reply('🔄 *Создаем платеж...*', { parse_mode: 'Markdown' });
-
-        try {
-            const createPayload = {
-                amount: { value: '100.00', currency: 'RUB' },
-                payment_method_data: { type: 'bank_card' },
-                confirmation: {
-                    type: 'redirect',
-                    return_url: `https://t.me/${ctx.botInfo.username}`
-                },
-                description: `Подписка на сообщество для пользователя ${userId}`,
-                metadata: {
-                    userId: userId,
-                    paymentId: paymentId,
-                    username: ctx.from.username || 'нет username'
-                },
-                capture: true,
-                // save_payment_method: true,
-                // ДОБАВЛЯЕМ ОБЯЗАТЕЛЬНЫЙ receipt ДЛЯ ЧЕКА 54-ФЗ
-                receipt: {
-                    customer: {
-                        email: email // Email, полученный от пользователя
-                    },
-                    items: [
-                        {
-                            description: `Подписка на сообщество (1 месяц)`,
-                            quantity: "1",
-                            amount: {
-                                value: "100.00",
-                                currency: "RUB"
-                            },
-                            vat_code: 1, // Ставка НДС. 1 - без НДС (согласуйте с бухгалтером!)
-                            payment_mode: 'full_payment',
-                            payment_subject: 'service'
-                        }
-                    ]
-                }
-            };
-
-            const payment = await checkout.createPayment(createPayload);
-            
-            await updatePayment(
-                { _id: paymentId },
-                { 
-                    yooId: payment.id,
-                    status: 'waiting_for_capture',
-                    paymentUrl: payment.confirmation.confirmation_url
-                }
-            );
-
-            await ctx.reply(`
-🔗 *Перейдите на страницу оплаты*
-
-Для завершения оплаты перейдите по ссылке ниже и следуйте инструкциям.
-
-После успешной оплаты вы автоматически получите доступ к сообществу.
-            `, {
-                parse_mode: 'Markdown',
-                reply_markup: {
-                    inline_keyboard: [
-                        [{
-                            text: '🌐 Перейти к оплате',
-                            // url: payment.confirmation.confirmation_url
-                            url: 'https://robokassa.com/'
-                        }],
-                        [{
-                            text: '🔄 Проверить оплату',
-                            callback_data: `check_payment:${paymentId}`
-                        }]
-                    ]
-                }
-            });
-
-        } catch (error) {
-            console.error('Ошибка при создании платежа с чеком:', error);
-            ctx.reply('⚠️ Произошла ошибка при создании платежа. Попробуйте позже или обратитесь в поддержку.');
-        }
-    }
-});
-
-// Проверка платежа
-bot.action(/check_payment:(.+)/, async (ctx) => {
-    const paymentId = ctx.match[1];
-    const userId = ctx.from.id;
-
-    try {
-        ctx.answerCbQuery('🔍 Проверяем платеж...');
-        
-        // Проверяем, есть ли уже доступ
-        const isMember = await isUserInChat(userId);
-        if (isMember) {
-            await ctx.editMessageText(`
-✅ *У вас уже есть доступ к сообществу!*
-
-Оплата не требуется. Если возникли проблемы с доступом, обратитесь в техподдержку.
-            `, { 
-                parse_mode: 'Markdown',
-                reply_markup: { inline_keyboard: [] }
-            });
-            return;
-        }
-
-        const paymentData = await getPayment({ _id: paymentId, userId: userId });
-        if (!paymentData || !paymentData.yooId) {
-            throw new Error('Платеж не найден');
-        }
-
-        const paymentInfo = await checkout.getPayment(paymentData.yooId);
-
-        if (paymentInfo.status === 'succeeded') {
-            const result = await addUserToChat(userId);
-
-            await updatePayment(
-                { _id: paymentId },
-                { 
-                    status: 'completed',
-                    paidAt: new Date(),
-                    amount: paymentInfo.amount.value
-                }
-            );
-            
-            await activateSubscription(userId, paymentInfo);
-
-            let message = `🎉 *Оплата успешно завершена!*\n\n`;
-            
-            if (result.success) {
-                if (result.alreadyMember) {
-                    message += `✅ Вы уже имеете доступ к сообществу!\n\n`;
-                } else if (result.isOwner) {
-                    message += `👑 Вы являетесь владельцем сообщества!\n\n`;
-                } else if (result.link) {
-                    message += `Вот ваша персональная ссылка для доступа:\n${result.link}\n\n`;
-                } else {
-                    message += `✅ Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
-                }
-                
-                message += `📌 *Важно:* Не передавайте доступ другим пользователям!`;
-                
-                await ctx.editMessageText(message, {
-                    parse_mode: 'Markdown',
-                    reply_markup: result.link ? {
-                        inline_keyboard: [
-                            [{ text: '📌 Моя подписка', callback_data: 'mysub' }],
-                            [{ text: '🚀 Перейти в сообщество', url: result.link }],
-                            [{ text: '💬 Техподдержка', url: 'https://t.me/golube123' }]
-                        ]
-                    } : null
-                });
-            } else {
-                await ctx.editMessageText(`
-✅ *Оплата успешно завершена!*
-
-Однако возникла проблема с доступом к сообществу. Пожалуйста, свяжитесь с техподдержкой.
-                `, { parse_mode: 'Markdown' });
-            }
-
-        } else {
-            ctx.answerCbQuery('⏳ Платеж еще не завершен', { show_alert: true });
-        }
-
-    } catch (error) {
-        console.error('Ошибка в check_payment:', error);
-        ctx.answerCbQuery('⚠️ Ошибка при проверке платежа', { show_alert: true });
-    }
-});
-
-// Отмена платежа
-bot.action(/cancel_pay:(.+)/, async (ctx) => {
-    const paymentId = ctx.match[1];
-    const userId = ctx.from.id;
-
-    try {
-        const paymentData = await getPayment({ _id: paymentId, userId: userId });
-        
-        if (paymentData?.yooId) {
-            try {
-                await checkout.cancelPayment(paymentData.yooId);
-            } catch (error) {
-                console.error('Ошибка при отмене платежа:', error);
-            }
-        }
-
-        await updatePayment(
-            { _id: paymentId },
-            { status: 'cancelled_by_user' }
-        );
-
-        // Если пользователь был в состоянии ожидания email, удаляем его
-        if (userStates[userId]) {
-            delete userStates[userId];
-        }
-
-        await ctx.editMessageText(`
-🗑 *Платеж отменен*
-
-Вы можете оформить подписку в любое время, воспользовавшись командой /start
-
-Хорошего дня! ☀️
-        `, { 
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [] }
-        });
-
-        ctx.answerCbQuery();
-    } catch (error) {
-        console.error('Ошибка в cancel_pay:', error);
-        ctx.answerCbQuery('⚠️ Ошибка при отмене платежа');
-    }
-});
-
-// Вебхук для ЮКассы
-app.post('/yookassa-webhook', async (req, res) => {
-    try {
-        const signature = req.headers['content-signature'];
-        
-        if (!verifyNotificationSignature(req.body, signature, process.env.YOOKASSA_SECRET_KEY)) {
-            console.error('Неверная подпись уведомления');
-            return res.status(401).send();
-        }
-
-        const notification = req.body;
-        const payment = notification.object;
-
-        if (notification.event === 'payment.succeeded') {
-            const paymentId = payment.metadata.paymentId;
-            const userId = parseInt(payment.metadata.userId);
-
-            const paymentData = await getPayment({ _id: paymentId, userId: userId });
-            if (!paymentData) {
-                return res.status(404).send('Payment not found');
-            }
-
-            // Проверяем, есть ли уже доступ
-            const isMember = await isUserInChat(userId);
-            if (isMember) {
-                await updatePayment(
-                    { _id: paymentId },
-                    {
-                        status: 'already_member',
-                        paidAt: new Date(),
-                        amount: payment.amount.value,
-                        updatedAt: new Date()
-                    }
-                );
-                
-                await bot.telegram.sendMessage(userId, `
-✅ *Оплата успешно завершена!*
-
-У вас уже есть доступ к сообществу. Если возникли проблемы, обратитесь в техподдержку.
-                `, { parse_mode: 'Markdown' });
-                
-                return res.status(200).send();
-            }
-
-            const result = await addUserToChat(userId);
-
-            await updatePayment(
-                { _id: paymentId },
-                {
-                    status: 'completed',
-                    paidAt: new Date(),
-                    amount: payment.amount.value,
-                    updatedAt: new Date()
-                }
-            );
-
-            await activateSubscription(userId, payment);
-
-            let message = `🎉 *Оплата успешно завершена!*\n\n`;
-            
-            if (result.success) {
-                if (result.alreadyMember) {
-                    message += `✅ Вы уже имеете acceso к сообществу!\n\n`;
-                } else if (result.isOwner) {
-                    message += `👑 Вы являетесь владельцем сообщества!\n\n`;
-                } else if (result.link) {
-                    message += `Вот ваша персональная ссылка для доступа:\n${result.link}\n\n`;
-                } else {
-                    message += `✅ Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
-                }
-                
-                message += `📌 *Важно:* Не передавайте доступ другим пользователям!`;
-                
-                await bot.telegram.sendMessage(userId, message, {
-                    parse_mode: 'Markdown',
-                    reply_markup: result.link ? {
-                        inline_keyboard: [
-                            [{ text: '🚀 Перейти в сообщество', url: result.link }]
-                        ]
-                    } : null
-                });
-            } else {
-                await bot.telegram.sendMessage(userId, `
-✅ *Оплата успешно завершена!*
-
-Однако возникла проблема с доступом к сообществу. Пожалуйста, свяжитесь с техподдержкой.
-                `, { parse_mode: 'Markdown' });
-            }
-        }
-
-        res.status(200).send();
-    } catch (error) {
-        console.error('Ошибка в вебхуке:', error);
-        res.status(500).send();
-    }
+    });
 });
 
 // Запуск приложения
@@ -1456,37 +854,3 @@ startApp();
 // Graceful shutdown
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
-cron.schedule('0 3 * * *', async () => {
-    const now = new Date();
-    const expiringSubs = await subscriptionsCollection.find({
-        status: 'active',
-        autoRenew: true,
-        currentPeriodEnd: { $lte: now }
-    }).toArray();
-
-    for (const sub of expiringSubs) {
-        try {
-            const newPayment = await checkout.createPayment({
-                amount: { value: '100.00', currency: 'RUB' },
-                capture: true,
-                payment_method_id: sub.paymentMethodId,
-                description: `Продление подписки для пользователя ${sub.userId}`,
-                metadata: { userId: sub.userId }
-            });
-
-            if (newPayment.status === 'succeeded') {
-                await activateSubscription(sub.userId, newPayment);
-                await bot.telegram.sendMessage(sub.userId, "✅ Ваша подписка продлена на месяц!");
-            } else {
-                await subscriptionsCollection.updateOne(
-                    { userId: sub.userId },
-                    { $set: { status: 'past_due' } }
-                );
-                await bot.telegram.sendMessage(sub.userId, "⚠️ Автосписание не удалось. Попробуйте оплатить вручную через /start");
-            }
-        } catch (err) {
-            console.error('Ошибка автопродления:', err);
-        }
-    }
-});
