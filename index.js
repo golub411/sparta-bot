@@ -437,7 +437,7 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
         //     ? 'https://auth.robokassa.ru/Merchant/Index.aspx'
         //     : 'https://auth.robokassa.ru/Merchant/Index.aspx';
             
-        const subscriptionUrl = `https://auth.robokassa.ru/RecurringSubscriptionPage/Subscription/Subscribe?SubscriptionId=f8f609fe-3798-4ac8-97e6-0523d53f4caa&user_id=${userId}&amount=100`;
+        const subscriptionUrl = `https://auth.robokassa.ru/RecurringSubscriptionPage/Subscription/Subscribe?SubscriptionId=f8f609fe-3798-4ac8-97e6-0523d53f4caa`;
 
         await updatePayment(
             { _id: paymentId },
