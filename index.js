@@ -213,7 +213,6 @@ function generateRobokassaSignature(OutSum, InvId, customParams = {}) {
     return crypto.createHash('md5').update(signatureString).digest('hex');
 }
 
-// Проверка подписи уведомлений от Robokassa
 function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = {}) {
     if (!OutSum || !InvId || !SignatureValue) {
         console.error('Missing required parameters for signature verification');
@@ -223,22 +222,17 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
     // Формируем базовую строку: OutSum:InvId:Пароль2
     let signatureString = `${OutSum}:${InvId}:${ROBOKASSA_PASS2}`;
     
-    // Копируем customParams, исключая параметр crc (так как это сама подпись)
+    // Копируем и фильтруем параметры
     const filteredParams = { ...customParams };
     delete filteredParams.crc;
+    delete filteredParams.SignatureValue;
     
-    // Фильтруем и сортируем оставшиеся параметры
-    const validParams = {};
-    for (const [key, value] of Object.entries(filteredParams)) {
-        if (value !== undefined && value !== null && value !== 'undefined') {
-            validParams[key] = value;
-        }
-    }
-
-    // Добавляем пользовательские параметры в алфавитном порядке
-    const sortedKeys = Object.keys(validParams).sort();
+    // Сортируем параметры по алфавиту
+    const sortedKeys = Object.keys(filteredParams).sort();
+    
+    // Добавляем параметры к строке подписи
     if (sortedKeys.length > 0) {
-        const paramsString = sortedKeys.map(key => `${key}=${validParams[key]}`).join(':');
+        const paramsString = sortedKeys.map(key => `${key}=${filteredParams[key]}`).join(':');
         signatureString += `:${paramsString}`;
     }
     
@@ -251,6 +245,7 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
     
     return mySignature.toLowerCase() === SignatureValue.toLowerCase();
 }
+
 // Команда /start с выбором способа оплаты
 bot.command('start', async (ctx) => {
     try {
@@ -622,8 +617,10 @@ app.post('/recurrent', async (req, res) => {
 });
 
 // Для GET-вебхука
-app.get('/robokassa-webhook', async (req, res) => {
+app.post('/robokassa-webhook', async (req, res) => {
     try {
+         console.log('POST webhook body:', req.body);
+    console.log('POST webhook query:', req.query);
 
         const { OutSum, InvId, SignatureValue, ...customParams } = req.query;
         
