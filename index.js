@@ -241,10 +241,8 @@ function generateRobokassaSignature(OutSum, InvId, customParams = {}) {
 
 // Проверка подписи уведомлений от Robokassa
 function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = {}) {
-    // Формируем строку для проверки подписи: OutSum:InvId:Пароль2
     let signatureString = `${OutSum}:${InvId}:${ROBOKASSA_PASS2}`;
     
-    // Добавляем пользовательские параметры, если они есть
     if (Object.keys(customParams).length > 0) {
         const paramsString = Object.entries(customParams)
             .sort(([a], [b]) => a.localeCompare(b))
@@ -253,8 +251,10 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
         signatureString += `:${paramsString}`;
     }
     
-    // Создаем MD5 хеш
+    console.log('Generated signature string:', signatureString);
     const mySignature = crypto.createHash('md5').update(signatureString).digest('hex');
+    console.log('My signature:', mySignature);
+    console.log('Received signature:', SignatureValue);
     
     return mySignature.toLowerCase() === SignatureValue.toLowerCase();
 }
@@ -641,6 +641,98 @@ app.post('/recurrent', async (req, res) => {
 
 // Вебхук для Robokassa
 app.get('/robokassa-webhook', async (req, res) => {
+    try {
+        const { OutSum, InvId, SignatureValue, ...customParams } = req.query;
+        
+        // Проверяем подпись
+        if (!verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams)) {
+            console.error('Неверная подпись уведомления от Robokassa robokassa-webhook');
+            return res.status(401).send('bad sign');
+        }
+
+        // Ищем платеж в базе
+        const paymentData = await getPayment({ _id: InvId });
+        if (!paymentData) {
+            return res.status(404).send('Payment not found');
+        }
+
+        const userId = paymentData.userId;
+
+        // Проверяем, есть ли уже доступ
+        const isMember = await isUserInChat(userId);
+        if (isMember) {
+            await updatePayment(
+                { _id: InvId },
+                {
+                    status: 'already_member',
+                    paidAt: new Date(),
+                    amount: OutSum,
+                    updatedAt: new Date()
+                }
+            );
+            
+            await bot.telegram.sendMessage(userId, `
+✅ *Оплата успешно завершена!*
+
+У вас уже есть доступ к сообществу. Если возникли проблемы, обратитесь в техподдержку.
+            `, { parse_mode: 'Markdown' });
+            
+            return res.send(`OK${InvId}`);
+        }
+
+        const result = await addUserToChat(userId);
+
+        await updatePayment(
+            { _id: InvId },
+            {
+                status: 'completed',
+                paidAt: new Date(),
+                amount: OutSum,
+                updatedAt: new Date()
+            }
+        );
+
+        await activateSubscription(userId, { OutSum, InvId }, 'robokassa');
+
+        let message = `🎉 *Оплата успешно завершена!*\n\n`;
+        
+        if (result.success) {
+            if (result.alreadyMember) {
+                message += `✅ Вы уже имеете acceso к сообществу!\n\n`;
+            } else if (result.isOwner) {
+                message += `👑 Вы являетесь владельцем сообщества!\n\n`;
+            } else if (result.link) {
+                message += `Вот ваша персональная ссылка для доступа:\n${result.link}\n\n`;
+            } else {
+                message += `✅ Вы были добавлены в сообщество! Проверьте список чатов.\n\n`;
+            }
+            
+            message += `📌 *Важно:* Не передавайте доступ другим пользователям!`;
+            
+            await bot.telegram.sendMessage(userId, message, {
+                parse_mode: 'Markdown',
+                reply_markup: result.link ? {
+                    inline_keyboard: [
+                        [{ text: '🚀 Перейти в сообщество', url: result.link }]
+                    ]
+                } : null
+            });
+        } else {
+            await bot.telegram.sendMessage(userId, `
+✅ *Оплата успешно завершена!*
+
+Однако возникла проблема с доступом к сообществу. Пожалуйста, свяжитесь с техподдержку.
+            `, { parse_mode: 'Markdown' });
+        }
+
+        res.send(`OK${InvId}`);
+    } catch (error) {
+        console.error('Ошибка в Robokassa вебхуке:', error);
+        res.status(500).send('error');
+    }
+});
+
+app.post('/robokassa-webhook', async (req, res) => {
     try {
         const { OutSum, InvId, SignatureValue, ...customParams } = req.query;
         
