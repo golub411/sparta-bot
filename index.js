@@ -36,28 +36,25 @@ let subscriptionsCollection;
 // Объект для хранения состояний пользователей
 const userStates = {};
 
-async function activateSubscription(userId, paymentInfo, paymentMethod = 'robokassa', subscriptionId = null) {
+async function activateSubscription(userId, paymentInfo, paymentMethod = 'robokassa') {
     const expiresAt = new Date();
     expiresAt.setMonth(expiresAt.getMonth() + 1);
 
-    const updateData = {
+    const subscriptionData = {
         userId,
         status: 'active',
         currentPeriodEnd: expiresAt,
         autoRenew: true,
-        lastPaymentId: paymentInfo.InvId || paymentInfo.paymentId,
+        lastPaymentId: paymentInfo.InvId,
         paymentMethod: paymentMethod,
         amount: paymentInfo.OutSum,
-        updatedAt: new Date()
+        updatedAt: new Date(),
+        paymentData: paymentInfo
     };
-
-    if (subscriptionId) {
-        updateData.robokassaSubscriptionId = subscriptionId;
-    }
 
     await subscriptionsCollection.updateOne(
         { userId },
-        { $set: updateData },
+        { $set: subscriptionData },
         { upsert: true }
     );
 }
@@ -140,55 +137,32 @@ async function isChatOwner(userId) {
     }
 }
 
-// Функция для добавления пользователя в чат/канал через инвайт-ссылку
 async function addUserToChat(userId) {
     try {
         const chatId = process.env.CHANNEL_ID;
-
+        
         // Проверяем, не является ли пользователь уже участником
-        const isAlreadyMember = await isUserInChat(userId);
-        if (isAlreadyMember) {
-            console.log(`✅ Пользователь ${userId} уже в чате`);
-            return { success: true, alreadyMember: true, link: null };
-        }
-
-        // Проверяем, не является ли пользователь владельцем
-        const isOwner = await isChatOwner(userId);
-        if (isOwner) {
-            console.log(`✅ Пользователь ${userId} - владелец чата`);
-            return { success: true, isOwner: true, link: null };
-        }
-
-        // Пробуем получить информацию о чате
-        const chat = await bot.telegram.getChat(chatId);
-
-        // Для каналов и групп — генерируем инвайт-ссылку
-        let inviteLink = null;
         try {
-            inviteLink = await bot.telegram.exportChatInviteLink(chatId);
-        } catch (linkError) {
-            console.error('Не удалось создать инвайт-ссылку:', linkError.message);
-        }
-
-        if (inviteLink) {
-            console.log(`🔗 Сгенерирована инвайт-ссылка для ${userId}: ${inviteLink}`);
-
-            // Пробуем разбанить пользователя (если он был кикнут)
-            try {
-                await bot.telegram.unbanChatMember(chatId, userId);
-            } catch (unbanError) {
-                if (!(unbanError.response && unbanError.response.description.includes('not banned'))) {
-                    console.error('Ошибка при разбане пользователя:', unbanError);
-                }
+            const member = await bot.telegram.getChatMember(chatId, userId);
+            if (['creator', 'administrator', 'member'].includes(member.status)) {
+                return { success: true, alreadyMember: true };
             }
-
-            return { success: true, link: inviteLink, type: chat.type };
+        } catch (error) {
+            // Пользователь не в чате, продолжаем
         }
 
-        throw new Error('Не удалось получить инвайт-ссылку');
+        // Создаем инвайт-ссылку
+        const inviteLink = await bot.telegram.createChatInviteLink(chatId, {
+            member_limit: 1,
+            creates_join_request: false
+        });
 
+        return { 
+            success: true, 
+            link: inviteLink.invite_link 
+        };
     } catch (error) {
-        console.error('Ошибка при добавлении пользователя:', error);
+        console.error('Error adding user to chat:', error);
         return { success: false, error: error.message };
     }
 }
@@ -241,17 +215,27 @@ function generateRobokassaSignature(OutSum, InvId, customParams = {}) {
 
 // Проверка подписи уведомлений от Robokassa
 function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = {}) {
+    if (!OutSum || !InvId || !SignatureValue) {
+        console.error('Missing required parameters for signature verification');
+        return false;
+    }
+
     // Формируем базовую строку: OutSum:InvId:Пароль2
     let signatureString = `${OutSum}:${InvId}:${ROBOKASSA_PASS2}`;
     
+    // Фильтруем и сортируем пользовательские параметры
+    const validParams = {};
+    for (const [key, value] of Object.entries(customParams)) {
+        if (value !== undefined && value !== null && value !== 'undefined') {
+            validParams[key] = value;
+        }
+    }
+
     // Добавляем пользовательские параметры в алфавитном порядке
-    const sortedCustomParams = Object.keys(customParams)
-        .sort()
-        .map(key => `${key}=${customParams[key]}`)
-        .join(':');
-    
-    if (sortedCustomParams) {
-        signatureString += `:${sortedCustomParams}`;
+    const sortedKeys = Object.keys(validParams).sort();
+    if (sortedKeys.length > 0) {
+        const paramsString = sortedKeys.map(key => `${key}=${validParams[key]}`).join(':');
+        signatureString += `:${paramsString}`;
     }
     
     // Создаем MD5 хеш
@@ -637,6 +621,7 @@ app.post('/recurrent', async (req, res) => {
 // Для GET-вебхука
 app.get('/robokassa-webhook', async (req, res) => {
     try {
+
         const { OutSum, InvId, SignatureValue, ...customParams } = req.query;
         
         // Удаляем ненужные параметры
@@ -655,7 +640,47 @@ app.get('/robokassa-webhook', async (req, res) => {
             return res.status(401).send('bad sign');
         }
         
-        // ... остальная логика обработки
+        // Обработка успешного платежа
+        const payment = await getPayment({ robokassaId: InvId });
+        if (!payment) {
+            console.error('Payment not found:', InvId);
+            return res.status(404).send('Payment not found');
+        }
+
+         // В начале обработки вебхука проверяем, не обработан ли уже этот платеж
+        if (payment.status === 'completed') {
+            console.log('Payment already processed:', InvId);
+            return res.send(`OK${InvId}`);
+        }
+
+        // Обновляем статус платежа
+        await updatePayment(
+            { _id: payment._id },
+            { status: 'completed', paidAt: new Date() }
+        );
+
+        // Активируем подписку
+        await activateSubscription(payment.userId, {
+            OutSum,
+            InvId,
+            ...customParams
+        });
+
+        // Добавляем пользователя в чат
+        const result = await addUserToChat(payment.userId);
+        if (result.success && result.link) {
+            try {
+                await bot.telegram.sendMessage(
+                    payment.userId,
+                    `🎉 *Оплата прошла успешно!*\n\n` +
+                    `Добро пожаловать в наше сообщество! Перейдите по ссылке для доступа: ${result.link}`,
+                    { parse_mode: 'Markdown' }
+                );
+            } catch (error) {
+                console.error('Error sending message:', error);
+            }
+        }
+
         res.send(`OK${InvId}`);
     } catch (error) {
         console.error('Error in webhook:', error);
