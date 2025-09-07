@@ -223,9 +223,13 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
     // Формируем базовую строку: OutSum:InvId:Пароль2
     let signatureString = `${OutSum}:${InvId}:${ROBOKASSA_PASS2}`;
     
-    // Фильтруем и сортируем пользовательские параметры
+    // Копируем customParams, исключая параметр crc (так как это сама подпись)
+    const filteredParams = { ...customParams };
+    delete filteredParams.crc;
+    
+    // Фильтруем и сортируем оставшиеся параметры
     const validParams = {};
-    for (const [key, value] of Object.entries(customParams)) {
+    for (const [key, value] of Object.entries(filteredParams)) {
         if (value !== undefined && value !== null && value !== 'undefined') {
             validParams[key] = value;
         }
@@ -247,7 +251,6 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
     
     return mySignature.toLowerCase() === SignatureValue.toLowerCase();
 }
-
 // Команда /start с выбором способа оплаты
 bot.command('start', async (ctx) => {
     try {
