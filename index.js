@@ -32,24 +32,28 @@ let subscriptionsCollection;
 // Объект для хранения состояний пользователей
 const userStates = {};
 
-async function activateSubscription(userId, paymentInfo, paymentMethod = 'robokassa') {
+async function activateSubscription(userId, paymentInfo, paymentMethod = 'robokassa', subscriptionId = null) {
     const expiresAt = new Date();
     expiresAt.setMonth(expiresAt.getMonth() + 1);
 
+    const updateData = {
+        userId,
+        status: 'active',
+        currentPeriodEnd: expiresAt,
+        autoRenew: true,
+        lastPaymentId: paymentInfo.InvId || paymentInfo.paymentId,
+        paymentMethod: paymentMethod,
+        amount: paymentInfo.OutSum,
+        updatedAt: new Date()
+    };
+
+    if (subscriptionId) {
+        updateData.robokassaSubscriptionId = subscriptionId;
+    }
+
     await subscriptionsCollection.updateOne(
         { userId },
-        {
-            $set: {
-                userId,
-                status: 'active',
-                currentPeriodEnd: expiresAt,
-                autoRenew: false, // Robokassa не поддерживает автоматическое списание
-                lastPaymentId: paymentInfo.InvId || paymentInfo.paymentId,
-                paymentMethod: paymentMethod,
-                amount: paymentInfo.OutSum,
-                updatedAt: new Date()
-            }
-        },
+        { $set: updateData },
         { upsert: true }
     );
 }
@@ -425,18 +429,18 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
         });
 
         // Формируем URL для оплаты
-        const baseUrl = ROBOKASSA_TEST_MODE 
-            ? 'https://auth.robokassa.ru/Merchant/Index.aspx'
-            : 'https://auth.robokassa.ru/Merchant/Index.aspx';
+        // const baseUrl = ROBOKASSA_TEST_MODE 
+        //     ? 'https://auth.robokassa.ru/Merchant/Index.aspx'
+        //     : 'https://auth.robokassa.ru/Merchant/Index.aspx';
             
-        const paymentUrl = `${baseUrl}?MerchantLogin=${ROBOKASSA_LOGIN}&OutSum=${OutSum}&InvId=${InvId}&Description=${encodeURIComponent(description)}&SignatureValue=${signature}&IsTest=${ROBOKASSA_TEST_MODE ? 1 : 0}`;
+        const subscriptionUrl = `https://auth.robokassa.ru/RecurringSubscriptionPage/Subscription/Subscribe?SubscriptionId=f8f609fe-3798-4ac8-97e6-0523d53f4caa&user_id=${userId}&amount=100`;
 
         await updatePayment(
             { _id: paymentId },
             { 
                 robokassaId: InvId,
-                status: 'waiting_for_payment',
-                paymentUrl: paymentUrl,
+                status: 'waiting_for_subscription',
+                paymentUrl: subscriptionUrl,
                 amount: OutSum
             }
         );
@@ -569,6 +573,65 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
     } catch (error) {
         console.error('Ошибка в cancel_pay:', error);
         ctx.answerCbQuery('⚠️ Ошибка при отмене платежа');
+    }
+});
+
+// Вебхук для уведомлений о рекуррентных платежах Robokassa
+app.post('/recurrent', async (req, res) => {
+    try {
+        const { OutSum, InvId, SignatureValue, SubscriptionId, ...customParams } = req.body;
+        
+        // Проверяем подпись
+        if (!verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams)) {
+            console.error('Неверная подпись уведомления от Robokassa');
+            return res.status(401).send('bad sign');
+        }
+
+        // Ищем подписку в базе
+        const subscriptionData = await subscriptionsCollection.findOne({ 
+            robokassaSubscriptionId: SubscriptionId 
+        });
+        
+        if (!subscriptionData) {
+            return res.status(404).send('Subscription not found');
+        }
+
+        const userId = subscriptionData.userId;
+
+        // Обновляем дату окончания подписки
+        const newExpiryDate = new Date();
+        newExpiryDate.setMonth(newExpiryDate.getMonth() + 1);
+        
+        await subscriptionsCollection.updateOne(
+            { userId },
+            {
+                $set: {
+                    currentPeriodEnd: newExpiryDate,
+                    lastPaymentDate: new Date(),
+                    lastPaymentAmount: OutSum,
+                    updatedAt: new Date()
+                }
+            }
+        );
+
+        // Записываем информацию о платеже
+        await createPayment({
+            _id: `recurring_${Date.now()}_${userId}`,
+            userId: userId,
+            paymentMethod: 'robokassa_recurring',
+            status: 'completed',
+            amount: OutSum,
+            robokassaId: InvId,
+            robokassaSubscriptionId: SubscriptionId,
+            username: subscriptionData.username,
+            firstName: subscriptionData.firstName,
+            lastName: subscriptionData.lastName
+        });
+
+        res.send(`OK${InvId}`);
+    } catch (error) {
+        console.error('Ошибка в Robokassa recurring вебхуке:', error);
+        res.status(500).send('error');
     }
 });
 
