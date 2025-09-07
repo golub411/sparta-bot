@@ -18,6 +18,10 @@ function isAdmin(userId) {
 const app = express();
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
+// Добавьте эти строки в начало вашего express-приложения
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
 // Конфигурация Robokassa
 const ROBOKASSA_LOGIN = process.env.ROBOKASSA_LOGIN;
 const ROBOKASSA_PASS1 = process.env.ROBOKASSA_PASS1; // Пароль 1 для создания платежей
@@ -579,17 +583,17 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
 // Вебхук для уведомлений о рекуррентных платежах Robokassa
 app.post('/recurrent', async (req, res) => {
     try {
-        const { OutSum, InvId, SignatureValue, SubscriptionId, ...customParams } = req.body;
+        const { OutSum, InvId, SignatureValue, SubscriptionId, ...customParams } = req.query;
         
         // Проверяем подпись
         if (!verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams)) {
-            console.error('Неверная подпись уведомления от Robokassa');
+            console.error('Неверная подпись уведомления от Robokassa recurrent');
             return res.status(401).send('bad sign');
         }
 
         // Ищем подписку в базе
         const subscriptionData = await subscriptionsCollection.findOne({ 
-            robokassaSubscriptionId: SubscriptionId 
+            robokassaSubscriptionId: SubscriptionId
         });
         
         if (!subscriptionData) {
@@ -642,7 +646,7 @@ app.get('/robokassa-webhook', async (req, res) => {
         
         // Проверяем подпись
         if (!verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams)) {
-            console.error('Неверная подпись уведомления от Robokassa');
+            console.error('Неверная подпись уведомления от Robokassa robokassa-webhook');
             return res.status(401).send('bad sign');
         }
 
