@@ -457,7 +457,7 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
                 inline_keyboard: [
                     [{
                         text: '🌐 Перейти к оплате',
-                        url: paymentUrl
+                        url: subscriptionUrl
                     }],
                     [{
                         text: '🔄 Проверить оплату',
