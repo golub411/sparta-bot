@@ -617,7 +617,7 @@ app.post('/recurrent', async (req, res) => {
 });
 
 // Для GET-вебхука
-app.post('/robokassa-webhook', async (req, res) => {
+app.get('/robokassa-webhook', async (req, res) => {
     try {
          console.log('POST webhook body:', req.body);
     console.log('POST webhook query:', req.query);
