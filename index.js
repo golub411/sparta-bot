@@ -560,7 +560,7 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
 // Вебхук для уведомлений о рекуррентных платежах Robokassa
 app.post('/recurrent', async (req, res) => {
     console.log('recurrent')
-    console.log(JSON.stringify(req))
+    console.log(req)
     // try {
     //     const { OutSum, InvId, SignatureValue, SubscriptionId, ...customParams } = req.query;
         
@@ -621,7 +621,7 @@ app.post('/recurrent', async (req, res) => {
 // Для GET-вебхука
 app.get('/robokassa-webhook', async (req, res) => {
     console.log('get(/robokassa-webhook')
-    console.log(JSON.stringify(req))
+    console.log(req)
     // try {
     //      console.log('POST webhook body:', req.body);
     // console.log('POST webhook query:', req.query);
