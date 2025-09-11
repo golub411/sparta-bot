@@ -234,7 +234,7 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
     const signatureString = `${ROBOKASSA_LOGIN}:${OutSum}:${InvId}:${ROBOKASSA_PASS1}`;
 
     // Сразу кодируем в MD5
-    const mySignature = crypto.createHash('md5').update(signatureString);
+    const mySignature = crypto.createHash('md5').update(signatureString).digest('hex');
     // Создаем MD5 хеш
     
     console.log('Generated signature string:', signatureString);
