@@ -480,18 +480,19 @@ async function checkRobokassaPaymentStatus(invId) {
         const login = ROBOKASSA_LOGIN;
         const password2 = ROBOKASSA_PASS2;
         
-        // Формируем URL для проверки статуса
-        const url = `https://auth.robokassa.ru/Merchant/WebService/Service.asmx/OpState?MerchantLogin=${login}&InvoiceID=${invId}&Signature=${crypto.createHash('md5').update(`${login}:${invId}:${password2}`).digest('hex')}`;
+        // Правильный метод проверки статуса
+        const signature = crypto.createHash('md5')
+            .update(`${login}:${invId}:${password2}`)
+            .digest('hex');
+        
+        const url = `https://auth.robokassa.ru/Merchant/WebService/Service.asmx/OpState?MerchantLogin=${login}&InvoiceID=${invId}&Signature=${signature}`;
         
         const response = await fetch(url);
-        const data = await response.text();
+        const text = await response.text();
         
-        // Парсим ответ и проверяем статус
-        if (data.includes('State') && data.includes('code="100"')) {
-            return true; // Платеж завершен
-        }
-        
-        return false;
+        // Парсим XML ответ
+        const stateMatch = text.match(/<State\s+[^>]*code="(\d+)"/);
+        return stateMatch && stateMatch[1] === '100';
     } catch (error) {
         console.error('Ошибка при проверке статуса платежа:', error);
         return false;
