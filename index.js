@@ -566,7 +566,7 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
 });
 
 // Вебхук для уведомлений о рекуррентных платежах Robokassa
-app.post('/recurrent', async (req, res) => {
+app.get('/recurrent', async (req, res) => {
     try {
         const { OutSum, InvId, SignatureValue, SubscriptionId, ...customParams } = req.query;
         
