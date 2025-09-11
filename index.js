@@ -18,14 +18,23 @@ function isAdmin(userId) {
 const app = express();
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
-// Добавьте эти строки в начало вашего express-приложения
+// Middleware для обработки данных
 app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use(express.json({ 
+    verify: (req, res, buf) => {
+        try {
+            JSON.parse(buf);
+        } catch (e) {
+            // Игнорируем ошибки парсинга для не-JSON запросов
+            return true;
+        }
+    }
+}));
 
 // Конфигурация Robokassa
 const ROBOKASSA_LOGIN = process.env.ROBOKASSA_LOGIN;
-const ROBOKASSA_PASS1 = process.env.ROBOKASSA_PASS1; // Пароль 1 для создания платежей
-const ROBOKASSA_PASS2 = process.env.ROBOKASSA_PASS2; // Пароль 2 для проверки вебхуков
+const ROBOKASSA_PASS1 = process.env.ROBOKASSA_PASS1;
+const ROBOKASSA_PASS2 = process.env.ROBOKASSA_PASS2;
 const ROBOKASSA_TEST_MODE = process.env.ROBOKASSA_TEST_MODE === 'true';
 
 // Подключение к MongoDB
@@ -103,10 +112,6 @@ async function updatePayment(query, updateData) {
         $set: { ...updateData, updatedAt: new Date() }
     });
 }
-
-// Middleware для обработки JSON
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
 
 // Функция для проверки, является ли пользователь участником чата
 async function isUserInChat(userId) {
@@ -249,14 +254,9 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
     console.log('My signature:', mySignature);
     console.log('Received signature:', SignatureValue);
     
-    // Добавляем проверку на существование SignatureValue перед toLowerCase
-    if (typeof SignatureValue !== 'string') {
-        console.error('SignatureValue is not a string:', SignatureValue);
-        return false;
-    }
-    
     return mySignature.toLowerCase() === SignatureValue.toLowerCase();
 }
+
 // Команда /start с выбором способа оплаты
 bot.command('start', async (ctx) => {
     try {
@@ -431,10 +431,6 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
         });
 
         // Формируем URL для оплаты
-        // const baseUrl = ROBOKASSA_TEST_MODE 
-        //     ? 'https://auth.robokassa.ru/Merchant/Index.aspx'
-        //     : 'https://auth.robokassa.ru/Merchant/Index.aspx';
-            
         const subscriptionUrl = `https://auth.robokassa.ru/RecurringSubscriptionPage/Subscription/Subscribe?SubscriptionId=f8f609fe-3798-4ac8-97e6-0523d53f4caa`;
 
         await updatePayment(
@@ -628,16 +624,26 @@ app.post('/recurrent', async (req, res) => {
     }
 });
 
-// Для GET-вебхука
+// Обработка GET вебхука от Robokassa
 app.get('/robokassa-webhook', async (req, res) => {
     try {
         console.log('GET webhook query:', req.query);
-        const { OutSum, InvId, SignatureValue, ...customParams } = req.query;
         
-        // Удаляем ненужные параметры
-        delete customParams['/robokassa-webhook'];
+        // Извлекаем параметры из query string
+        const OutSum = req.query.OutSum || req.query.out_summ;
+        const InvId = req.query.InvId || req.query.inv_id;
+        const SignatureValue = req.query.SignatureValue || req.query.crc;
         
-        console.log('Webhook received:', { OutSum, InvId, SignatureValue, customParams });
+        // Копируем все остальные параметры
+        const customParams = { ...req.query };
+        delete customParams.OutSum;
+        delete customParams.out_summ;
+        delete customParams.InvId;
+        delete customParams.inv_id;
+        delete customParams.SignatureValue;
+        delete customParams.crc;
+        
+        console.log('Processing payment:', { OutSum, InvId, SignatureValue, customParams });
         
         if (!OutSum || !InvId || !SignatureValue) {
             console.error('Missing required parameters');
@@ -649,14 +655,14 @@ app.get('/robokassa-webhook', async (req, res) => {
             console.error('Invalid signature');
             return res.status(401).send('bad sign');
         }
-        // Обработка успешного платежа
+        
+        // Ищем платеж в базе
         const payment = await getPayment({ robokassaId: InvId });
         if (!payment) {
             console.error('Payment not found:', InvId);
             return res.status(404).send('Payment not found');
         }
 
-         // В начале обработки вебхука проверяем, не обработан ли уже этот платеж
         if (payment.status === 'completed') {
             console.log('Payment already processed:', InvId);
             return res.send(`OK${InvId}`);
@@ -697,28 +703,81 @@ app.get('/robokassa-webhook', async (req, res) => {
     }
 });
 
-// Для POST-вебхука (добавьте эту функцию)
-app.post('/robokassa-recurrent', async (req, res) => {
+// Обработка POST вебхука от Robokassa
+app.post('/robokassa-webhook', async (req, res) => {
     try {
-        const { OutSum, InvId, SignatureValue, SubscriptionId, ...customParams } = req.body;
+        console.log('POST webhook body:', req.body);
         
-        console.log('Recurrent webhook received:', { OutSum, InvId, SignatureValue, SubscriptionId, customParams });
+        // Извлекаем параметры из тела запроса
+        const OutSum = req.body.OutSum || req.body.out_summ;
+        const InvId = req.body.InvId || req.body.inv_id;
+        const SignatureValue = req.body.SignatureValue || req.body.crc;
+        
+        // Копируем все остальные параметры
+        const customParams = { ...req.body };
+        delete customParams.OutSum;
+        delete customParams.out_summ;
+        delete customParams.InvId;
+        delete customParams.inv_id;
+        delete customParams.SignatureValue;
+        delete customParams.crc;
+        
+        console.log('Processing payment:', { OutSum, InvId, SignatureValue, customParams });
         
         if (!OutSum || !InvId || !SignatureValue) {
-            console.error('Missing required parameters in recurrent webhook');
+            console.error('Missing required parameters');
             return res.status(400).send('Missing parameters');
         }
         
         // Проверяем подпись
         if (!verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams)) {
-            console.error('Invalid signature in recurrent webhook');
+            console.error('Invalid signature');
             return res.status(401).send('bad sign');
         }
         
-        // ... остальная логика обработки recurrent-платежа
+        // Ищем платеж в базе
+        const payment = await getPayment({ robokassaId: InvId });
+        if (!payment) {
+            console.error('Payment not found:', InvId);
+            return res.status(404).send('Payment not found');
+        }
+
+        if (payment.status === 'completed') {
+            console.log('Payment already processed:', InvId);
+            return res.send(`OK${InvId}`);
+        }
+
+        // Обновляем статус платежа
+        await updatePayment(
+            { _id: payment._id },
+            { status: 'completed', paidAt: new Date() }
+        );
+
+        // Активируем подписку
+        await activateSubscription(payment.userId, {
+            OutSum,
+            InvId,
+            ...customParams
+        });
+
+        // Добавляем пользователя в чат
+        const result = await addUserToChat(payment.userId);
+        if (result.success && result.link) {
+            try {
+                await bot.telegram.sendMessage(
+                    payment.userId,
+                    `🎉 *Оплата прошла успешно!*\n\n` +
+                    `Добро пожаловать в наше сообщество! Перейдите по ссылке для доступа: ${result.link}`,
+                    { parse_mode: 'Markdown' }
+                );
+            } catch (error) {
+                console.error('Error sending message:', error);
+            }
+        }
+
         res.send(`OK${InvId}`);
     } catch (error) {
-        console.error('Error in recurrent webhook:', error);
+        console.error('Error in webhook:', error);
         res.status(500).send('error');
     }
 });
