@@ -606,7 +606,7 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
 });
 
 // Вебхук для уведомлений о рекуррентных платежах Robokassa
-app.post('/recurrent', express.urlencoded({ extended: true }), async (req, res) => {
+app.get('/recurrent', express.urlencoded({ extended: true }), async (req, res) => {
     console.log('📥 Получен recurrent вебхук:', req.body);
     
     try {
@@ -682,7 +682,7 @@ app.post('/recurrent', express.urlencoded({ extended: true }), async (req, res) 
 });
 
 // Обработчик для вебхука Robokassa (Result URL)
-app.post('/robokassa-webhook', express.urlencoded({ extended: true }), async (req, res) => {
+app.get('/robokassa-webhook', express.urlencoded({ extended: true }), async (req, res) => {
     console.log('📥 Получен вебхук от Robokassa:', req.body);
     
     try {
@@ -775,7 +775,7 @@ app.post('/robokassa-webhook', express.urlencoded({ extended: true }), async (re
 // GET endpoint для вебхука (на случай, если Robokassa отправит GET)
 app.get('/robokassa-webhook', async (req, res) => {
     console.log('📥 GET запрос к вебхуку:', req.query);
-    // Перенаправляем на POST обработчик
+    // Перенаправляем на get обработчик
     req.body = req.query;
     return app._router.handle(req, res);
 });
