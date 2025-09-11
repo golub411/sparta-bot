@@ -567,6 +567,11 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
 
 // Вебхук для уведомлений о рекуррентных платежах Robokassa
 app.get('/recurrent', async (req, res) => {
+
+    console.log("/recurrent")
+    console.log("/recurrent")
+    console.log("/recurrent")
+    
     try {
         const { OutSum, InvId, SignatureValue, SubscriptionId, ...customParams } = req.query;
         
@@ -575,10 +580,6 @@ app.get('/recurrent', async (req, res) => {
             console.error('Неверная подпись уведомления от Robokassa recurrent');
             return res.status(401).send('bad sign');
         }
-
-        console.log("/recurrent")
-        console.log("/recurrent")
-        console.log("/recurrent")
 
         // Ищем подписку в базе
         const subscriptionData = await subscriptionsCollection.findOne({ 
