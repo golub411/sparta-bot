@@ -220,22 +220,25 @@ function generateRobokassaSignature(OutSum, InvId, customParams = {}) {
 }
 
 function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = {}) {
-    // Проверяем наличие всех обязательных параметров
-    if (!OutSum || !InvId || !SignatureValue) {
-        console.error('Missing required parameters for signature verification', {
-            OutSum,
-            InvId,
-            SignatureValue
-        });
-        return false;
+    // Фильтруем только пользовательские параметры с префиксом Shp_
+    const shpParams = {};
+    for (const [key, value] of Object.entries(customParams)) {
+        if (key.startsWith('Shp_')) {
+            shpParams[key] = value;
+        }
     }
 
-    // Формируем строку точно как указано
-    const signatureString = `${ROBOKASSA_LOGIN}:${OutSum}:${InvId}:${ROBOKASSA_PASS2}`;
+    // Формируем базовую строку: MerchantLogin:OutSum:InvId:Пароль#2
+    let signatureString = `${ROBOKASSA_LOGIN}:${OutSum}:${InvId}:${ROBOKASSA_PASS2}`;
 
-    // Сразу кодируем в MD5
-    const mySignature = crypto.createHash('md5').update(signatureString).digest('hex');
+    // Добавляем пользовательские параметры (Shp_) в отсортированном порядке
+    const sortedShpParams = Object.keys(shpParams).sort();
+    for (const key of sortedShpParams) {
+        signatureString += `:${key}=${shpParams[key]}`;
+    }
+
     // Создаем MD5 хеш
+    const mySignature = crypto.createHash('md5').update(signatureString).digest('hex');
     
     console.log('Generated signature string:', signatureString);
     console.log('My signature:', mySignature);
