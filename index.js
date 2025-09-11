@@ -576,6 +576,10 @@ app.post('/recurrent', async (req, res) => {
             return res.status(401).send('bad sign');
         }
 
+        console.log("/recurrent")
+        console.log("/recurrent")
+        console.log("/recurrent")
+
         // Ищем подписку в базе
         const subscriptionData = await subscriptionsCollection.findOne({ 
             robokassaSubscriptionId: SubscriptionId
