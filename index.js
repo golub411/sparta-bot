@@ -230,25 +230,12 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
         return false;
     }
 
-    // Формируем базовую строку: OutSum:InvId:Пароль2
-    let signatureString = `${OutSum}:${InvId}:${ROBOKASSA_PASS2}`;
-    
-    // Копируем и фильтруем параметры
-    const filteredParams = { ...customParams };
-    delete filteredParams.crc;
-    delete filteredParams.SignatureValue;
-    
-    // Сортируем параметры по алфавиту
-    const sortedKeys = Object.keys(filteredParams).sort();
-    
-    // Добавляем параметры к строке подписи
-    if (sortedKeys.length > 0) {
-        const paramsString = sortedKeys.map(key => `${key}=${filteredParams[key]}`).join(':');
-        signatureString += `:${paramsString}`;
-    }
-    
-    // Создаем MD5 хеш
+    // Формируем строку точно как указано
+    const signatureString = `${ROBOKASSA_LOGIN}:${OutSum}:${InvId}:${ROBOKASSA_PASS1}`;
+
+    // Сразу кодируем в MD5
     const mySignature = crypto.createHash('md5').update(signatureString).digest('hex');
+    // Создаем MD5 хеш
     
     console.log('Generated signature string:', signatureString);
     console.log('My signature:', mySignature);
