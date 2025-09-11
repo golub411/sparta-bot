@@ -1,10 +1,10 @@
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
-const { MongoClient, ObjectId } = require('mongodb');
+const { MongoClient } = require('mongodb');
 const express = require('express');
 const crypto = require('crypto');
 const cron = require('node-cron');
-const axios = require('axios');
+const CryptoJS = require('crypto-js');
 
 // Загружаем администраторов из .env
 const ADMINS = process.env.ADMINS ? process.env.ADMINS.split(',').map(id => id.trim()) : [];
@@ -151,31 +151,16 @@ async function addUserToChat(userId) {
             // Пользователь не в чате, продолжаем
         }
 
-        // Пытаемся добавить пользователя напрямую
-        try {
-            await bot.telegram.unbanChatMember(chatId, userId);
-            await new Promise(resolve => setTimeout(resolve, 1000));
-        } catch (error) {
-            console.log('Не удалось разбанить пользователя (возможно, он не был забанен):', error.message);
-        }
+        // Создаем инвайт-ссылку
+        const inviteLink = await bot.telegram.createChatInviteLink(chatId, {
+            member_limit: 1,
+            creates_join_request: false
+        });
 
-        try {
-            await bot.telegram.addChatMember(chatId, userId);
-            return { success: true };
-        } catch (addError) {
-            console.log('Не удалось добавить пользователя напрямую:', addError.message);
-            
-            // Если не получилось добавить напрямую, создаем инвайт-ссылку
-            const inviteLink = await bot.telegram.createChatInviteLink(chatId, {
-                member_limit: 1,
-                creates_join_request: false
-            });
-
-            return { 
-                success: true, 
-                link: inviteLink.invite_link 
-            };
-        }
+        return { 
+            success: true, 
+            link: inviteLink.invite_link 
+        };
     } catch (error) {
         console.error('Error adding user to chat:', error);
         return { success: false, error: error.message };
@@ -298,7 +283,7 @@ bot.command('start', async (ctx) => {
         ctx.replyWithMarkdown(`
 🎉 *Добро пожаловать в наше эксклюзивное сообщество!*
 
-Для доaccess к закрытому контенту оформите подписку на 1 месяц.
+Для доступа к закрытому контенту оформите подписку на 1 месяц.
 
 💎 *Преимущества подписки:*
 ✔️ Доступ к эксклюзивным материалам
@@ -431,23 +416,22 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
         
         const signature = generateRobokassaSignature(OutSum, InvId, {
             user_id: userId,
-            description: encodeURIComponent(description),
-            Recurring: 'true' // Включаем рекуррентные платежи
+            description: encodeURIComponent(description)
         });
 
         // Формируем URL для оплаты
-        const baseUrl = ROBOKASSA_TEST_MODE 
-            ? 'https://auth.robokassa.ru/Merchant/Index.aspx'
-            : 'https://auth.robokassa.ru/Merchant/Index.aspx';
+        // const baseUrl = ROBOKASSA_TEST_MODE 
+        //     ? 'https://auth.robokassa.ru/Merchant/Index.aspx'
+        //     : 'https://auth.robokassa.ru/Merchant/Index.aspx';
             
-        const paymentUrl = `${baseUrl}?MerchantLogin=${ROBOKASSA_LOGIN}&OutSum=${OutSum}&InvoiceID=${InvId}&Description=${encodeURIComponent(description)}&SignatureValue=${signature}&Recurring=true&user_id=${userId}`;
+        const subscriptionUrl = `https://auth.robokassa.ru/RecurringSubscriptionPage/Subscription/Subscribe?SubscriptionId=f8f609fe-3798-4ac8-97e6-0523d53f4caa`;
 
         await updatePayment(
             { _id: paymentId },
             { 
                 robokassaId: InvId,
-                status: 'waiting_payment',
-                paymentUrl: paymentUrl,
+                status: 'waiting_for_subscription',
+                paymentUrl: subscriptionUrl,
                 amount: OutSum
             }
         );
@@ -464,7 +448,7 @@ bot.action(/confirm_pay:(.+)/, async (ctx) => {
                 inline_keyboard: [
                     [{
                         text: '🌐 Перейти к оплате',
-                        url: paymentUrl
+                        url: subscriptionUrl
                     }],
                     [{
                         text: '🔄 Проверить оплату',
@@ -518,6 +502,7 @@ bot.action(/check_payment:(.+)/, async (ctx) => {
 
         // Если статус еще не обновлен вебхуком, проверяем через API
         if (paymentData.status !== 'completed') {
+            // Здесь должна быть функция проверки статуса через API Robokassa
             const isPaid = await checkRobokassaPaymentStatus(paymentData.robokassaId);
             
             if (isPaid) {
@@ -527,56 +512,16 @@ bot.action(/check_payment:(.+)/, async (ctx) => {
                     { status: 'completed', paidAt: new Date() }
                 );
                 
-                // Активируем подписку
-                await activateSubscription(userId, {
-                    OutSum: paymentData.amount,
-                    InvId: paymentData.robokassaId
-                });
-
                 // Добавляем пользователя в чат
                 const result = await addUserToChat(userId);
-                
-                if (result.success) {
-                    if (result.alreadyMember) {
-                        await ctx.editMessageText(`
-✅ *Оплата прошла успешно!*
-
-Вы уже состоите в нашем сообществе. Подписка продлена.
-                        `, { parse_mode: 'Markdown' });
-                    } else if (result.link) {
-                        await ctx.editMessageText(`
-✅ *Оплата прошла успешно!*
-
-Добро пожаловать в наше сообщество! Перейдите по ссылке для доступа: ${result.link}
-                        `, { parse_mode: 'Markdown' });
-                    } else {
-                        await ctx.editMessageText(`
-✅ *Оплата прошла успешно!*
-
-Добро пожаловать в наше сообщество! Вы были добавлены в группу.
-                        `, { parse_mode: 'Markdown' });
-                    }
-                } else {
-                    await ctx.editMessageText(`
-✅ *Оплата прошла успешно!*
-
-Возникла проблема с добавлением в группу. Свяжитесь с поддержкой.
-                    `, { parse_mode: 'Markdown' });
-                }
+                // ... остальная логика
             } else {
                 ctx.answerCbQuery('⏳ Платеж еще не завершен', { show_alert: true });
                 return;
             }
-        } else {
-            // Платеж уже обработан
-            await ctx.editMessageText(`
-✅ *Платеж уже обработан!*
-
-Вы уже имеете доступ к сообществу.
-            `, { parse_mode: 'Markdown' });
         }
         
-        ctx.answerCbQuery();
+        // ... остальная логика для завершенного платежа
     } catch (error) {
         console.error('Ошибка в check_payment:', error);
         ctx.answerCbQuery('⚠️ Ошибка при проверке платежа', { show_alert: true });
@@ -613,26 +558,22 @@ bot.action(/cancel_pay:(.+)/, async (ctx) => {
 });
 
 // Вебхук для уведомлений о рекуррентных платежах Robokassa
-app.post('/recurrent', express.urlencoded({ extended: true }), async (req, res) => {
-    console.log('📥 Получен recurrent вебхук:', req.body);
-    
+app.post('/recurrent', async (req, res) => {
     try {
-        // Для recurrent уведомлений Robokassa отправляет данные в формате x-www-form-urlencoded
-        const { OutSum, InvId, SignatureValue, SubscriptionId, ...customParams } = req.body;
+        const { OutSum, InvId, SignatureValue, SubscriptionId, ...customParams } = req.query;
         
-        // Проверяем подпись согласно документации Robokassa
+        // Проверяем подпись
         if (!verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams)) {
-            console.error('❌ Неверная подпись уведомления от Robokassa recurrent');
+            console.error('Неверная подпись уведомления от Robokassa recurrent');
             return res.status(401).send('bad sign');
         }
 
-        // Ищем подписку в базе по SubscriptionId
+        // Ищем подписку в базе
         const subscriptionData = await subscriptionsCollection.findOne({ 
             robokassaSubscriptionId: SubscriptionId
         });
         
         if (!subscriptionData) {
-            console.error('❌ Подписка не найдена:', SubscriptionId);
             return res.status(404).send('Subscription not found');
         }
 
@@ -648,7 +589,7 @@ app.post('/recurrent', express.urlencoded({ extended: true }), async (req, res) 
                 $set: {
                     currentPeriodEnd: newExpiryDate,
                     lastPaymentDate: new Date(),
-                    lastPaymentAmount: parseFloat(OutSum),
+                    lastPaymentAmount: OutSum,
                     updatedAt: new Date()
                 }
             }
@@ -660,7 +601,7 @@ app.post('/recurrent', express.urlencoded({ extended: true }), async (req, res) 
             userId: userId,
             paymentMethod: 'robokassa_recurring',
             status: 'completed',
-            amount: parseFloat(OutSum),
+            amount: OutSum,
             robokassaId: InvId,
             robokassaSubscriptionId: SubscriptionId,
             username: subscriptionData.username,
@@ -668,62 +609,54 @@ app.post('/recurrent', express.urlencoded({ extended: true }), async (req, res) 
             lastName: subscriptionData.lastName
         });
 
-        // Отправляем уведомление пользователю
-        try {
-            await bot.telegram.sendMessage(
-                userId,
-                `🔄 *Произведено автоматическое списание за подписку*\n\n` +
-                `Сумма: ${OutSum} руб.\n` +
-                `Подписка активна до: ${newExpiryDate.toLocaleDateString('ru-RU')}`,
-                { parse_mode: 'Markdown' }
-            );
-        } catch (error) {
-            console.error('Ошибка отправки уведомления пользователю:', error);
-        }
-
-        console.log('✅ Обработан рекуррентный платеж для пользователя:', userId);
         res.send(`OK${InvId}`);
     } catch (error) {
-        console.error('❌ Ошибка в Robokassa recurrent вебхуке:', error);
+        console.error('Ошибка в Robokassa recurring вебхуке:', error);
         res.status(500).send('error');
     }
 });
 
-// Обработчик для вебхука Robokassa (Result URL)
-app.post('/robokassa-webhook', express.urlencoded({ extended: true }), async (req, res) => {
-    console.log('📥 Получен вебхук от Robokassa:', req.body);
-    
+// Для GET-вебхука
+app.get('/robokassa-webhook', async (req, res) => {
     try {
-        const { OutSum, InvId, SignatureValue, ...customParams } = req.body;
+         console.log('POST webhook body:', req.body);
+    console.log('POST webhook query:', req.query);
+
+        const { OutSum, InvId, SignatureValue, ...customParams } = req.query;
+        
+        // Удаляем ненужные параметры
+        delete customParams['/robokassa-webhook'];
+        
+        console.log('Webhook received:', { OutSum, InvId, SignatureValue, customParams });
+        
+        if (!OutSum || !InvId || !SignatureValue) {
+            console.error('Missing required parameters');
+            return res.status(400).send('Missing parameters');
+        }
         
         // Проверяем подпись
         if (!verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams)) {
-            console.error('❌ Неверная подпись вебхука от Robokassa');
+            console.error('Invalid signature');
             return res.status(401).send('bad sign');
         }
         
-        // Ищем платеж в базе данных
+        // Обработка успешного платежа
         const payment = await getPayment({ robokassaId: InvId });
         if (!payment) {
-            console.error('❌ Платеж не найден:', InvId);
+            console.error('Payment not found:', InvId);
             return res.status(404).send('Payment not found');
         }
 
-        // Если платеж уже обработан
+         // В начале обработки вебхука проверяем, не обработан ли уже этот платеж
         if (payment.status === 'completed') {
-            console.log('ℹ️ Платеж уже обработан:', InvId);
+            console.log('Payment already processed:', InvId);
             return res.send(`OK${InvId}`);
         }
 
         // Обновляем статус платежа
         await updatePayment(
             { _id: payment._id },
-            { 
-                status: 'completed', 
-                paidAt: new Date(),
-                // Сохраняем SubscriptionId для рекуррентных платежей
-                robokassaSubscriptionId: customParams.SubscriptionId || null
-            }
+            { status: 'completed', paidAt: new Date() }
         );
 
         // Активируем подписку
@@ -733,59 +666,52 @@ app.post('/robokassa-webhook', express.urlencoded({ extended: true }), async (re
             ...customParams
         });
 
-        // Сохраняем SubscriptionId для рекуррентных платежей
-        if (customParams.SubscriptionId) {
-            await subscriptionsCollection.updateOne(
-                { userId: payment.userId },
-                { $set: { robokassaSubscriptionId: customParams.SubscriptionId } }
-            );
-        }
-
         // Добавляем пользователя в чат
         const result = await addUserToChat(payment.userId);
-        if (result.success) {
+        if (result.success && result.link) {
             try {
-                if (result.alreadyMember) {
-                    await bot.telegram.sendMessage(
-                        payment.userId,
-                        `🎉 *Оплата прошла успешно!*\n\n` +
-                        `Вы уже состоите в нашем сообществе. Подписка продлена.`,
-                        { parse_mode: 'Markdown' }
-                    );
-                } else if (result.link) {
-                    await bot.telegram.sendMessage(
-                        payment.userId,
-                        `🎉 *Оплата прошла успешно!*\n\n` +
-                        `Добро пожаловать в наше сообщество! Перейдите по ссылке для доступа: ${result.link}`,
-                        { parse_mode: 'Markdown' }
-                    );
-                } else {
-                    await bot.telegram.sendMessage(
-                        payment.userId,
-                        `🎉 *Оплата прошла успешно!*\n\n` +
-                        `Добро пожаловать в наше сообщество! Вы были добавлены в группу.`,
-                        { parse_mode: 'Markdown' }
-                    );
-                }
+                await bot.telegram.sendMessage(
+                    payment.userId,
+                    `🎉 *Оплата прошла успешно!*\n\n` +
+                    `Добро пожаловать в наше сообщество! Перейдите по ссылке для доступа: ${result.link}`,
+                    { parse_mode: 'Markdown' }
+                );
             } catch (error) {
-                console.error('Ошибка отправки сообщения:', error);
+                console.error('Error sending message:', error);
             }
         }
 
-        console.log('✅ Обработан вебхук для платежа:', InvId);
         res.send(`OK${InvId}`);
     } catch (error) {
-        console.error('❌ Ошибка в вебхуке:', error);
+        console.error('Error in webhook:', error);
         res.status(500).send('error');
     }
 });
 
-// GET endpoint для вебхука (на случай, если Robokassa отправит GET)
-app.get('/robokassa-webhook', async (req, res) => {
-    console.log('📥 GET запрос к вебхуку:', req.query);
-    // Перенаправляем на POST обработчик
-    req.body = req.query;
-    return app._router.handle(req, res);
+// Для POST-вебхука (добавьте эту функцию)
+app.post('/robokassa-recurrent', async (req, res) => {
+    try {
+        const { OutSum, InvId, SignatureValue, SubscriptionId, ...customParams } = req.body;
+        
+        console.log('Recurrent webhook received:', { OutSum, InvId, SignatureValue, SubscriptionId, customParams });
+        
+        if (!OutSum || !InvId || !SignatureValue) {
+            console.error('Missing required parameters in recurrent webhook');
+            return res.status(400).send('Missing parameters');
+        }
+        
+        // Проверяем подпись
+        if (!verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams)) {
+            console.error('Invalid signature in recurrent webhook');
+            return res.status(401).send('bad sign');
+        }
+        
+        // ... остальная логика обработки recurrent-платежа
+        res.send(`OK${InvId}`);
+    } catch (error) {
+        console.error('Error in recurrent webhook:', error);
+        res.status(500).send('error');
+    }
 });
 
 // Главная панель администратора
