@@ -105,6 +105,7 @@ async function updatePayment(query, updateData) {
 }
 
 // Middleware для обработки JSON
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 // Функция для проверки, является ли пользователь участником чата
@@ -214,8 +215,13 @@ function generateRobokassaSignature(OutSum, InvId, customParams = {}) {
 }
 
 function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = {}) {
+    // Проверяем наличие всех обязательных параметров
     if (!OutSum || !InvId || !SignatureValue) {
-        console.error('Missing required parameters for signature verification');
+        console.error('Missing required parameters for signature verification', {
+            OutSum,
+            InvId,
+            SignatureValue
+        });
         return false;
     }
 
@@ -243,9 +249,14 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
     console.log('My signature:', mySignature);
     console.log('Received signature:', SignatureValue);
     
+    // Добавляем проверку на существование SignatureValue перед toLowerCase
+    if (typeof SignatureValue !== 'string') {
+        console.error('SignatureValue is not a string:', SignatureValue);
+        return false;
+    }
+    
     return mySignature.toLowerCase() === SignatureValue.toLowerCase();
 }
-
 // Команда /start с выбором способа оплаты
 bot.command('start', async (ctx) => {
     try {
@@ -619,9 +630,7 @@ app.post('/recurrent', async (req, res) => {
 // Для GET-вебхука
 app.get('/robokassa-webhook', async (req, res) => {
     try {
-         console.log('POST webhook body:', req.body);
-    console.log('POST webhook query:', req.query);
-
+        console.log('GET webhook query:', req.query);
         const { OutSum, InvId, SignatureValue, ...customParams } = req.query;
         
         // Удаляем ненужные параметры
@@ -639,7 +648,6 @@ app.get('/robokassa-webhook', async (req, res) => {
             console.error('Invalid signature');
             return res.status(401).send('bad sign');
         }
-        
         // Обработка успешного платежа
         const payment = await getPayment({ robokassaId: InvId });
         if (!payment) {
