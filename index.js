@@ -231,7 +231,7 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
     }
 
     // Формируем строку точно как указано
-    const signatureString = `${ROBOKASSA_LOGIN}:${OutSum}:${InvId}:${ROBOKASSA_PASS1}`;
+    const signatureString = `${ROBOKASSA_LOGIN}:${OutSum}:${InvId}:${ROBOKASSA_PASS2}`;
 
     // Сразу кодируем в MD5
     const mySignature = crypto.createHash('md5').update(signatureString).digest('hex');
