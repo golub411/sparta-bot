@@ -230,7 +230,7 @@ function verifyRobokassaSignature(OutSum, InvId, SignatureValue, customParams = 
 
     // Формируем базовую строку: MerchantLogin:OutSum:InvId:Пароль#2
     // let signatureString = `${ROBOKASSA_LOGIN}:${OutSum}:${InvId}:${ROBOKASSA_PASS2}`;
-    let signatureString = `${ROBOKASSA_LOGIN}:${OutSum}:${InvId}:${ROBOKASSA_PASS1}`;
+    let signatureString = `${ROBOKASSA_LOGIN}:${InvId}:${ROBOKASSA_PASS1}`;
 
     // Добавляем пользовательские параметры (Shp_) в отсортированном порядке
     const sortedShpParams = Object.keys(shpParams).sort();
